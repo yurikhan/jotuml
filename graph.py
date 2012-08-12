@@ -243,7 +243,7 @@ class EdgeView(View):
             hittest = self.hittest(complex(event.x, event.y))
             if isinstance(hittest, EdgeView.HitTest.End):
                 end = self.path[hittest.index]
-                caption = self.edge.from_caption if hittest.index == 0 else self.edge.to_caption
+                caption = (self.edge.from_caption if hittest.index == 0 else self.edge.to_caption) or ''
                 window.edit(self, caption, end.real, end.imag, 80, 22, hittest.index)
                 window.entry.set_position(len(caption))
                 return
@@ -403,9 +403,9 @@ class EdgeView(View):
         context.stroke()
 
         if self.edge.from_caption:
-            self.draw_caption(context, path[0], path[1], self.edge.from_caption)
+            self.draw_caption(context, path[0], path[1], self.edge.from_caption or '')
         if self.edge.to_caption:
-            self.draw_caption(context, path[-1], path[-2], self.edge.from_caption)
+            self.draw_caption(context, path[-1], path[-2], self.edge.to_caption or '')
 
 def DoNothing(o):
     pass
