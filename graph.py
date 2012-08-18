@@ -10,7 +10,9 @@ from gi.repository import PangoCairo
 from gi.repository import Gtk
 from gi.repository import Gdk
 
+
 EPSILON = 10
+
 
 def projection(a, b, c):
     l2 = abs(b - a) ** 2
@@ -23,14 +25,18 @@ def projection(a, b, c):
         return b
     return a + t * (b - a)
 
+
 def distance(a, b, c):
     return abs(c - projection(a, b, c))
+
 
 def snap_coord(x):
     return 0.5 + int(x)
 
+
 def snap_point(p):
     return complex(snap_coord(p.real), snap_coord(p.imag))
+
 
 class View:
     def __init__(self):
@@ -45,9 +51,28 @@ class View:
     def press(self, window, event):
         pass
 
+
 class Node:
     def __init__(self, name):
         self.name = name
+
+
+class Edge:
+    class Aggregation:
+        NONE = 0
+        AGGREGATE = 1
+        COMPOSITE = 2
+
+    def __init__(self, from_node, to_node):
+        self.from_node = from_node
+        self.from_aggregation = Edge.Aggregation.NONE
+        self.from_navigable = False
+        self.from_caption = None
+        self.to_node = to_node
+        self.to_aggregation = Edge.Aggregation.NONE
+        self.to_navigable = False
+        self.to_caption = None
+
 
 class NodeView(View):
     def __init__(self, diagram, node, x, y, w, h):
@@ -153,20 +178,6 @@ class NodeView(View):
         PangoCairo.show_layout(context, layout)
         context.identity_matrix()
 
-class Edge:
-    class Aggregation:
-        NONE = 0
-        AGGREGATE = 1
-        COMPOSITE = 2
-    def __init__(self, from_node, to_node):
-        self.from_node = from_node
-        self.from_aggregation = Edge.Aggregation.NONE
-        self.from_navigable = False
-        self.from_caption = None
-        self.to_node = to_node
-        self.to_aggregation = Edge.Aggregation.NONE
-        self.to_navigable = False
-        self.to_caption = None
 
 class EdgeView(View):
     def __init__(self, diagram, edge, path):
@@ -378,7 +389,6 @@ class EdgeView(View):
         PangoCairo.show_layout(context, layout)
         context.identity_matrix()
 
-
     def draw(self, context):
         if not self.path:
             return
@@ -407,8 +417,10 @@ class EdgeView(View):
         if self.edge.to_caption:
             self.draw_caption(context, path[-1], path[-2], self.edge.to_caption or '')
 
+
 def DoNothing(o):
     pass
+
 
 class Diagram:
     def __init__(self, model):
@@ -462,6 +474,7 @@ class Diagram:
         self.views.remove(view)
         self.changed(self)
 
+
 class Model:
     def __init__(self):
         self.nodes = []
@@ -496,6 +509,7 @@ class Model:
         self.diagram.delete_edge(edge)
         self.edges.remove(edge)
         self.changed(self)
+
 
 class MainWindow(Gtk.Window):
 
@@ -679,10 +693,12 @@ class MainWindow(Gtk.Window):
         print 'button release %d, %d' % (event.x, event.y)
         return False
 
+
 def main():
     main_window = MainWindow()
     main_window.show()
     Gtk.main()
+
 
 if __name__ == '__main__':
     main()
