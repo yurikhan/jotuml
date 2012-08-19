@@ -51,10 +51,28 @@ class View:
     def press(self, window, event):
         pass
 
+    def new_compartment(self):
+        return False
+
 
 class Node:
-    def __init__(self, name):
-        self.name = name
+    def __init__(self):
+        self.compartments = [Compartment(self)]
+
+    def new_compartment_after(self, compartment, text):
+        new_compartment = Compartment(self, text)
+        self.compartments.insert(self.compartments.index(compartment) + 1, new_compartment)
+        return new_compartment
+
+    def join_compartments(self, first, second):
+        first.text += second.text
+        self.compartments.remove(second)
+
+
+class Compartment:
+    def __init__(self, node, text=''):
+        self.node = weakref.ref(node)
+        self.text = text
 
 
 class Edge:
@@ -74,6 +92,50 @@ class Edge:
         self.to_caption = None
 
 
+class CompartmentView:
+    def __init__(self, node_view, compartment):
+        self.node_view = weakref.ref(node_view)
+        self.compartment = compartment
+        self.h = 16
+        self.y = 0 # relative to node_view
+
+    def edit(self, window, event):
+        print 'Edit compartment'
+        window.edit(self, self.compartment.text, self.node_view().x + 1, self.node_view().y + self.y + 1, self.node_view().w - 2, self.h - 2)
+        if event:
+            x, y = event.x - self.node_view().x, event.y - self.y
+            bx, by = window.entry.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
+            it = window.entry.get_iter_at_location(bx, by)
+            window.entry.get_buffer().place_cursor(it)
+
+    def edited(self, window, text, context=None):
+        if not text and self.node_view().is_new:
+            print 'Cancel node'
+            self.node_view().diagram().model().delete_node(self.node_view().node)
+        else:
+            print 'Edited node'
+            self.compartment.text = text
+            self.node_view().is_new = False
+            self.node_view().resize(window)
+            self.node_view().changed(self)
+
+    def new_compartment(self, window, top_text, bottom_text):
+        window.finish_edit(top_text)
+        self.compartment.text = top_text
+        self.node_view().new_compartment_after(self, bottom_text).edit(window, None)
+        buf = window.entry.get_buffer()
+        buf.place_cursor(buf.get_start_iter())
+        return True
+
+    def next(self):
+        index = self.node_view().compartments.index(self)
+        return self.node_view().compartments[index + 1] if index != len(self.node_view().compartments) else None
+
+    def previous(self):
+        index = self.node_view().compartments.index(self)
+        return self.node_view().compartments[index - 1] if index != 0 else None
+
+
 class NodeView(View):
     def __init__(self, diagram, node, x, y, w, h):
         View.__init__(self)
@@ -83,8 +145,31 @@ class NodeView(View):
         self.y = snap_coord(y)
         self.w = int(w)
         self.h = int(h)
+        self.compartments = [CompartmentView(self, c) for c in node.compartments]
         self.is_new = True
         self.changed = DoNothing
+
+    def new_compartment_after(self, compartment_view, text):
+        self.is_new = False
+        new_compartment_view = CompartmentView(self, self.node.new_compartment_after(compartment_view.compartment, text))
+        self.compartments.insert(self.compartments.index(compartment_view) + 1, new_compartment_view)
+        new_compartment_view.y = compartment_view.y + compartment_view.h
+        return new_compartment_view
+
+    def join_compartments(self, window, first, second):
+        if not first or not second:
+            return
+        window.finish_edit()
+        buf = Gtk.TextBuffer()
+        buf.set_text(first.compartment.text)
+        position = buf.get_end_iter().get_offset()
+        self.node.join_compartments(first.compartment, second.compartment)
+        self.compartments.remove(second)
+        self.resize(window)
+        self.changed(self)
+        first.edit(window, None)
+        buf = window.entry.get_buffer()
+        buf.place_cursor(buf.get_iter_at_offset(position))
 
     def clamp(self, point):
         top, bottom, left, right = [self.y, self.y + self.h, self.x, self.x + self.w]
@@ -98,8 +183,8 @@ class NodeView(View):
 
     def press(self, window, event):
         if event.button == 3: # right button: pop up contex menu
-            print 'Node popup menu'
-            window.context = self
+            print 'Compartment popup menu'
+            window.context = self.compartment_at(event.x, event.y)
             window.node_popup.popup(None, None, None, None, 3, event.time)
         elif event.button == 2: # middle button: initiate node move (with all incident edges)
             print 'Move node'
@@ -118,25 +203,15 @@ class NodeView(View):
             window.grab([edge_view])
             edge_view.grab([1], event)
         else:
-            self.edit(window, event)
+            self.compartment_at(event.x, event.y).edit(window, event)
 
-    def edit(self, window, event):
-        print 'Edit node'
-        window.edit(self, self.node.name, self.x, self.y, self.w, self.h)
-        if event:
-            x, y = event.x - self.x, event.y - self.y
-            _, index, _ = window.entry.get_layout().xy_to_index(x * 1024, y * 1024)
-            window.entry.set_position(index)
-
-    def edited(self, text, context=None):
-        if not text and self.is_new:
-            print 'Cancel node'
-            self.diagram().model().delete_node(self.node)
-        else:
-            print 'Edited node'
-            self.node.name = text
-            self.is_new = False
-            self.changed(self)
+    def compartment_at(self, x, y):
+        if not (self.x <= x < self.x + self.w):
+            return None
+        for c in self.compartments:
+            if self.y + c.y <= y < self.y + c.y + c.h:
+                return c
+        return self.compartments[-1]
 
     def delete(self):
         print 'Delete node'
@@ -156,27 +231,54 @@ class NodeView(View):
         self.drag_start = None
         self.drag_start_event = None
 
+    def resize(self, window):
+        layout = Pango.Layout(window.get_pango_context())
+        layout.set_font_description(Pango.FontDescription('sans 10'))
+
+        width, height = 0, 0
+        for c in self.compartments:
+            layout.set_indent(-16384)
+            layout.set_text(c.compartment.text, -1)
+            ink_r, logical_r = layout.get_pixel_extents()
+            w, h = 4 + abs(ink_r.x) + ink_r.width, 6 + logical_r.height
+            if height != c.y:
+                c.y = height
+            if h != c.h:
+                c.h = h
+            width = max(width, w)
+            height += h
+
+        if width != self.w or height != self.h:
+            for e in self.diagram().views:
+                if isinstance(e, EdgeView) and self.node in [e.edge.from_node, e.edge.to_node]:
+                    e.node_resizing(self, width, height)
+            self.w = width
+            self.h = height
+
     def draw(self, context):
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
         context.rectangle(self.x, self.y, self.w, self.h)
         context.stroke()
 
-        pangocairo_context = PangoCairo.create_context(context)
         context.set_antialias(cairo.ANTIALIAS_SUBPIXEL)
-        layout = Pango.Layout(pangocairo_context)
+        layout = PangoCairo.create_layout(context)
         font = Pango.FontDescription('sans 10')
         layout.set_font_description(font)
-        layout.set_text(self.node.name, len(self.node.name))
-        PangoCairo.update_layout(context, layout)
-        width, height = layout.get_pixel_size()
-        if width + 13 > self.w:
-            self.w = width + 13
-            self.changed(self)
-            return
-        context.translate(self.x + self.w / 2 - width / 2, self.y + self.h / 2 - height / 2)
-        PangoCairo.show_layout(context, layout)
-        context.identity_matrix()
+
+        for c in self.compartments[1:]:
+            context.move_to(self.x, self.y + c.y)
+            context.rel_line_to(self.w, 0)
+            context.stroke()
+
+        for i, c in enumerate(self.compartments):
+            layout.set_indent(-16384)
+            layout.set_text(c.compartment.text, len(c.compartment.text))
+            PangoCairo.update_layout(context, layout)
+            ink_r, _ = layout.get_pixel_extents()
+            context.translate(self.x + 2, self.y + c.y + 3)
+            PangoCairo.show_layout(context, layout)
+            context.identity_matrix()
 
 
 class EdgeView(View):
@@ -253,10 +355,12 @@ class EdgeView(View):
         if event.button == 1:
             hittest = self.hittest(complex(event.x, event.y))
             if isinstance(hittest, EdgeView.HitTest.End):
+                print 'Edit end'
                 end = self.path[hittest.index]
                 caption = (self.edge.from_caption if hittest.index == 0 else self.edge.to_caption) or ''
                 window.edit(self, caption, end.real, end.imag, 80, 22, hittest.index)
-                window.entry.set_position(len(caption))
+                buf = window.entry.get_buffer()
+                buf.place_cursor(buf.get_end_iter())
                 return
         elif event.button == 2:
             point = complex(event.x, event.y)
@@ -275,6 +379,7 @@ class EdgeView(View):
         elif event.button == 3:
             hittest = self.hittest(complex(event.x, event.y))
             if isinstance(hittest, EdgeView.HitTest.End):
+                print 'End context menu'
                 aggregation = self.edge.from_aggregation if hittest.index == 0 else self.edge.to_aggregation
                 window.aggregate_action.set_active(aggregation == Edge.Aggregation.AGGREGATE)
                 window.composite_action.set_active(aggregation == Edge.Aggregation.COMPOSITE)
@@ -282,11 +387,13 @@ class EdgeView(View):
                 window.context = (self, hittest)
                 window.edge_end_popup.popup(None, None, None, None, 3, event.time)
             else:
+                print 'Edge context menu'
                 window.context = (self, hittest)
                 window.edge_popup.popup(None, None, None, None, 3, event.time)
             return
 
-    def edited(self, text, index):
+    def edited(self, window, text, index):
+        print 'Edited end'
         if index == 0:
             self.edge.from_caption = text
         else:
@@ -369,9 +476,8 @@ class EdgeView(View):
         context.stroke()
 
     def draw_caption(self, context, a, b, text):
-        pangocairo_context = PangoCairo.create_context(context)
         context.set_antialias(cairo.ANTIALIAS_SUBPIXEL)
-        layout = Pango.Layout(pangocairo_context)
+        layout = PangoCairo.create_layout(context)
         font = Pango.FontDescription('sans 10')
         layout.set_font_description(font)
         layout.set_text(text, len(text))
@@ -417,6 +523,12 @@ class EdgeView(View):
         if self.edge.to_caption:
             self.draw_caption(context, path[-1], path[-2], self.edge.to_caption or '')
 
+    def node_resizing(self, node_view, new_width, new_height):
+        end = 0 if node_view.node is self.edge.from_node else -1
+        self.path[end] = complex(node_view.x + new_width * (self.path[end].real - node_view.x) / node_view.w,
+                                 node_view.y + new_height * (self.path[end].imag - node_view.y) / node_view.h)
+        self.changed(self)
+
 
 def DoNothing(o):
     pass
@@ -443,7 +555,7 @@ class Diagram:
         return None
 
     def new_node_view(self, x, y, w=50, h=22):
-        node = self.model().new_node('')
+        node = self.model().new_node()
         view = NodeView(self, node, x, y, w, h)
         view.changed = self.changed
         self.views.append(view)
@@ -482,8 +594,8 @@ class Model:
         self.diagram = Diagram(self)
         self.changed = DoNothing
 
-    def new_node(self, name=''):
-        node = Node(name)
+    def new_node(self):
+        node = Node()
         self.nodes.append(node)
         self.changed(self)
         return node
@@ -515,8 +627,8 @@ class MainWindow(Gtk.Window):
 
     UI_INFO = '''
 <ui>
-  <popup name="NodeMenu">
-    <menuitem action="EditNode"/>
+  <popup name="CompartmentMenu">
+    <menuitem action="EditCompartment"/>
     <menuitem action="DeleteNode"/>
   </popup>
   <popup name="EdgeMenu">
@@ -555,7 +667,7 @@ class MainWindow(Gtk.Window):
         self.entry = None
 
         action_group = Gtk.ActionGroup('actions')
-        action_group.add_actions([('EditNode', Gtk.STOCK_EDIT, None, None, None, self.edit_node_command),
+        action_group.add_actions([('EditCompartment', Gtk.STOCK_EDIT, None, None, None, self.edit_compartment_command),
                                   ('DeleteNode', Gtk.STOCK_DELETE, None, None, None, self.delete_node_command),
                                   ('DeleteEdge', Gtk.STOCK_DELETE, None, None, None, self.delete_edge_command)])
 
@@ -573,16 +685,16 @@ class MainWindow(Gtk.Window):
         self.ui_manager.add_ui_from_string(MainWindow.UI_INFO)
         self.ui_manager.insert_action_group(action_group)
  
-        self.node_popup = self.ui_manager.get_widget('/NodeMenu')
+        self.node_popup = self.ui_manager.get_widget('/CompartmentMenu')
         self.edge_popup = self.ui_manager.get_widget('/EdgeMenu')
         self.edge_end_popup = self.ui_manager.get_widget('/EdgeEndMenu')
 
-    def edit_node_command(self, data=None):
+    def edit_compartment_command(self, data=None):
         self.context.edit(self, None)
         self.context = None
 
     def delete_node_command(self, data=None):
-        self.context.delete()
+        self.context.node_view().delete()
         self.context = None
 
     def delete_edge_command(self, data=None):
@@ -614,8 +726,13 @@ class MainWindow(Gtk.Window):
         self.drawing_area.grab_remove()
         self.grabbed = None
 
-    def finish_edit(self):
-        self.edited.edited(self.entry.get_text(), self.edited_context)
+    def finish_edit(self, text=None):
+        buf = self.entry.get_buffer()
+        self.edited.edited(self, text if text is not None else buf.get_text(*buf.get_bounds(), include_hidden_chars=True), self.edited_context)
+        self.entry.destroy()
+        self.entry = None
+
+    def cancel_edit(self):
         self.entry.destroy()
         self.entry = None
 
@@ -634,7 +751,7 @@ class MainWindow(Gtk.Window):
         if node_views:
             return node_views[0].press(self, event)
         print 'Create node'
-        self.diagram.new_node_view(event.x, event.y).edit(self, event)
+        self.diagram.new_node_view(event.x, event.y).compartments[0].edit(self, event)
         return False
 
     def button_release_event(self, widget, event, data=None):
@@ -663,15 +780,17 @@ class MainWindow(Gtk.Window):
         Gtk.main_quit()
 
     def edit(self, subject, text, x, y, w, h, context=None):
-        self.entry = Gtk.Entry()
-        self.entry.set_has_frame(False)
-        self.entry.set_text(text or '')
-        self.entry.set_alignment(0.5)
-        self.entry.set_width_chars(0)
+        self.entry = Gtk.TextView()
+        self.entry.get_buffer().set_text(text or '')
         self.entry.set_size_request(w, h)
+        self.entry.set_indent(-16)
+        self.entry.set_right_margin(16)
         self.entry.connect('key_press_event', self.edit_key_press_event)
         self.entry.connect('button_press_event', self.edit_button_press_event)
         self.entry.connect('button_release_event', self.edit_button_release_event)
+        self.entry.connect('backspace', self.edit_backspace)
+        self.entry.connect('delete-from-cursor', self.edit_delete_from_cursor)
+        self.entry.connect('move-cursor', self.edit_move_cursor)
         self.entry.show()
         self.drawing_area.put(self.entry, x, y)
         self.entry.grab_focus()
@@ -680,9 +799,44 @@ class MainWindow(Gtk.Window):
 
     def edit_key_press_event(self, edit, event, data=None):
         print 'keypress %x' % event.keyval
+        buf = self.entry.get_buffer()
+        cursor = buf.get_iter_at_mark(buf.get_insert())
         if (event.keyval == Gdk.KEY_Escape):
             self.finish_edit()
             return True
+        if (event.keyval == Gdk.KEY_Return
+            and Gdk.ModifierType.SHIFT_MASK & event.state
+            and not Gdk.ModifierType.CONTROL_MASK & event.state):
+            buf.insert_interactive_at_cursor(u'\u2028', -1, self.entry.get_editable())
+            return True
+        if (event.string == '-' and cursor.starts_line()):
+            buf.insert_interactive_at_cursor(u'\u2212', -1, self.entry.get_editable()) # Minus sign
+            return True
+        if (event.keyval == Gdk.KEY_Return
+            and not Gdk.ModifierType.SHIFT_MASK & event.state
+            and Gdk.ModifierType.CONTROL_MASK & event.state):
+            return self.edited.new_compartment(self,
+                                               buf.get_text(buf.get_start_iter(), cursor, True),
+                                               buf.get_text(cursor, buf.get_end_iter(), True))
+        return False
+
+    def edit_backspace(self, edit, data=None):
+        print 'backspace'
+        buf = self.entry.get_buffer()
+        cursor = buf.get_iter_at_mark(buf.get_insert())
+        if cursor.equal(buf.get_start_iter()):
+            print 'Join compartments backwards'
+            return self.edited.node_view().join_compartments(self, self.edited.previous(), self.edited)
+        return False
+
+    def edit_delete_from_cursor(self, edit, delete_type, count, data=None):
+        if delete_type == Gtk.DeleteType.CHARS and count == 1:
+            print 'delete'
+            buf = self.entry.get_buffer()
+            cursor = buf.get_iter_at_mark(buf.get_insert())
+            if cursor.equal(buf.get_end_iter()):
+                print 'Join compartments forward'
+                return self.edited.node_view().join_compartments(self, self.edited, self.edited.next())
         return False
 
     def edit_button_press_event(self, edit, event, data=None):
