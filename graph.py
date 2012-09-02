@@ -729,6 +729,9 @@ class MainWindow(Gtk.Window):
     def delete_event(self, widget, event, data=None):
         return False
 
+    def file_quit_command(self, data=None):
+        self.emit('destroy')
+
     def _destroy(self, widget, data=None):
         Gtk.main_quit()
 
