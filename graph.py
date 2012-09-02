@@ -12,6 +12,7 @@ from gi.repository import Gdk
 
 
 EPSILON = 10
+COMPARTMENT_SEPARATOR = u'\u2029'.encode('utf-8')
 
 
 def projection(a, b, c):
@@ -99,26 +100,6 @@ class CompartmentView:
         self.h = 16
         self.y = 0 # relative to node_view
 
-    def edit(self, window, event):
-        print 'Edit compartment'
-        window.edit(self, self.compartment.text, self.node_view().x + 1, self.node_view().y + self.y + 1, self.node_view().w - 2, self.h - 2)
-        if event:
-            x, y = event.x - self.node_view().x, event.y - self.y
-            bx, by = window.entry.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
-            it = window.entry.get_iter_at_location(bx, by)
-            window.entry.get_buffer().place_cursor(it)
-
-    def edited(self, window, text, context=None):
-        if not text and self.node_view().is_new:
-            print 'Cancel node'
-            self.node_view().diagram().model().delete_node(self.node_view().node)
-        else:
-            print 'Edited node'
-            self.compartment.text = text
-            self.node_view().is_new = False
-            self.node_view().resize(window)
-            self.node_view().changed(self)
-
     def new_compartment(self, window, top_text, bottom_text):
         window.finish_edit(top_text)
         self.compartment.text = top_text
@@ -148,28 +129,6 @@ class NodeView(View):
         self.compartments = [CompartmentView(self, c) for c in node.compartments]
         self.is_new = True
         self.changed = DoNothing
-
-    def new_compartment_after(self, compartment_view, text):
-        self.is_new = False
-        new_compartment_view = CompartmentView(self, self.node.new_compartment_after(compartment_view.compartment, text))
-        self.compartments.insert(self.compartments.index(compartment_view) + 1, new_compartment_view)
-        new_compartment_view.y = compartment_view.y + compartment_view.h
-        return new_compartment_view
-
-    def join_compartments(self, window, first, second):
-        if not first or not second:
-            return
-        window.finish_edit()
-        buf = Gtk.TextBuffer()
-        buf.set_text(first.compartment.text)
-        position = buf.get_end_iter().get_offset()
-        self.node.join_compartments(first.compartment, second.compartment)
-        self.compartments.remove(second)
-        self.resize(window)
-        self.changed(self)
-        first.edit(window, None)
-        buf = window.entry.get_buffer()
-        buf.place_cursor(buf.get_iter_at_offset(position))
 
     def clamp(self, point):
         top, bottom, left, right = [self.y, self.y + self.h, self.x, self.x + self.w]
@@ -203,7 +162,38 @@ class NodeView(View):
             window.grab([edge_view])
             edge_view.grab([1], event)
         else:
-            self.compartment_at(event.x, event.y).edit(window, event)
+            self.edit(window, event)
+
+    def edit(self, window, event):
+        print 'Edit node'
+        window.edit(self, COMPARTMENT_SEPARATOR.join(c.compartment.text for c in self.compartments),
+                    self.x + 1, self.y + 1, self.w - 2, self.h - 2)
+        if event:
+            x, y = event.x - self.x, event.y - self.y
+            bx, by = window.entry.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
+            it = window.entry.get_iter_at_location(bx, by)
+            window.entry.get_buffer().place_cursor(it)
+
+    def edited(self, window, text, context=None):
+        if not text and self.is_new:
+            print 'Cancel node'
+            self.diagram().model().delete_node(self.node)
+        else:
+            print 'Edited node'
+            ts = text.split(COMPARTMENT_SEPARATOR)
+
+            for c, t in zip(self.compartments, ts):
+                c.compartment.text = t
+            if len(ts) < len(self.compartments):
+                del self.compartments[len(ts):]
+            elif len(ts) > len(self.compartments):
+                for t in ts[len(self.compartments):]:
+                    compartment = self.node.new_compartment_after(self.node.compartments[-1], t)
+                    self.compartments.append(CompartmentView(self, compartment))
+
+            self.is_new = False
+            self.resize(window)
+            self.changed(self)
 
     def compartment_at(self, x, y):
         if not (self.x <= x < self.x + self.w):
@@ -259,6 +249,11 @@ class NodeView(View):
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
         context.rectangle(self.x, self.y, self.w, self.h)
+
+        for c in self.compartments[1:]:
+            context.move_to(self.x, self.y + c.y)
+            context.rel_line_to(self.w, 0)
+
         context.stroke()
 
         context.set_antialias(cairo.ANTIALIAS_SUBPIXEL)
@@ -266,16 +261,10 @@ class NodeView(View):
         font = Pango.FontDescription('sans 10')
         layout.set_font_description(font)
 
-        for c in self.compartments[1:]:
-            context.move_to(self.x, self.y + c.y)
-            context.rel_line_to(self.w, 0)
-            context.stroke()
-
-        for i, c in enumerate(self.compartments):
+        for c in self.compartments:
             layout.set_indent(-16384)
-            layout.set_text(c.compartment.text, len(c.compartment.text))
+            layout.set_text(c.compartment.text, -1)
             PangoCairo.update_layout(context, layout)
-            ink_r, _ = layout.get_pixel_extents()
             context.translate(self.x + 2, self.y + c.y + 3)
             PangoCairo.show_layout(context, layout)
             context.identity_matrix()
@@ -628,7 +617,7 @@ class MainWindow(Gtk.Window):
     UI_INFO = '''
 <ui>
   <popup name="CompartmentMenu">
-    <menuitem action="EditCompartment"/>
+    <menuitem action="EditNode"/>
     <menuitem action="DeleteNode"/>
   </popup>
   <popup name="EdgeMenu">
@@ -667,7 +656,7 @@ class MainWindow(Gtk.Window):
         self.entry = None
 
         action_group = Gtk.ActionGroup('actions')
-        action_group.add_actions([('EditCompartment', Gtk.STOCK_EDIT, None, None, None, self.edit_compartment_command),
+        action_group.add_actions([('EditNode', Gtk.STOCK_EDIT, None, None, None, self.edit_node_command),
                                   ('DeleteNode', Gtk.STOCK_DELETE, None, None, None, self.delete_node_command),
                                   ('DeleteEdge', Gtk.STOCK_DELETE, None, None, None, self.delete_edge_command)])
 
@@ -689,8 +678,8 @@ class MainWindow(Gtk.Window):
         self.edge_popup = self.ui_manager.get_widget('/EdgeMenu')
         self.edge_end_popup = self.ui_manager.get_widget('/EdgeEndMenu')
 
-    def edit_compartment_command(self, data=None):
-        self.context.edit(self, None)
+    def edit_node_command(self, data=None):
+        self.context.node_view().edit(self, None)
         self.context = None
 
     def delete_node_command(self, data=None):
@@ -751,7 +740,7 @@ class MainWindow(Gtk.Window):
         if node_views:
             return node_views[0].press(self, event)
         print 'Create node'
-        self.diagram.new_node_view(event.x, event.y).compartments[0].edit(self, event)
+        self.diagram.new_node_view(event.x, event.y).edit(self, event)
         return False
 
     def button_release_event(self, widget, event, data=None):
@@ -785,17 +774,32 @@ class MainWindow(Gtk.Window):
         self.entry.set_size_request(w, h)
         self.entry.set_indent(-16)
         self.entry.set_right_margin(16)
+        self.entry.connect('draw', self.edit_draw)
         self.entry.connect('key_press_event', self.edit_key_press_event)
-        self.entry.connect('button_press_event', self.edit_button_press_event)
-        self.entry.connect('button_release_event', self.edit_button_release_event)
-        self.entry.connect('backspace', self.edit_backspace)
-        self.entry.connect('delete-from-cursor', self.edit_delete_from_cursor)
-        self.entry.connect('move-cursor', self.edit_move_cursor)
         self.entry.show()
         self.drawing_area.put(self.entry, x, y)
         self.entry.grab_focus()
         self.edited = subject
         self.edited_context = context
+
+    def edit_draw(self, edit, context, data=None):
+        context.set_source_rgb(0, 0, 0)
+        context.set_line_width(1)
+
+        buf = edit.get_buffer()
+        it = buf.get_start_iter()
+        end = buf.get_end_iter()
+        it.forward_to_line_end()
+        while not it.equal(end):
+            if it.get_char() == COMPARTMENT_SEPARATOR:
+                r = edit.get_iter_location(it)
+                context.move_to(0, r.y + r.height + 0.5)
+                context.rel_line_to(edit.get_allocated_width(), 0)
+            it.forward_to_line_end()
+
+        context.stroke()
+
+        return False
 
     def edit_key_press_event(self, edit, event, data=None):
         print 'keypress %x' % event.keyval
@@ -807,7 +811,7 @@ class MainWindow(Gtk.Window):
         if (event.keyval == Gdk.KEY_Return
             and Gdk.ModifierType.SHIFT_MASK & event.state
             and not Gdk.ModifierType.CONTROL_MASK & event.state):
-            buf.insert_interactive_at_cursor(u'\u2028', -1, self.entry.get_editable())
+            buf.insert_interactive_at_cursor(u'\u2028', -1, self.entry.get_editable()) # Line separator
             return True
         if (event.string == '-' and cursor.starts_line()):
             buf.insert_interactive_at_cursor(u'\u2212', -1, self.entry.get_editable()) # Minus sign
@@ -815,36 +819,8 @@ class MainWindow(Gtk.Window):
         if (event.keyval == Gdk.KEY_Return
             and not Gdk.ModifierType.SHIFT_MASK & event.state
             and Gdk.ModifierType.CONTROL_MASK & event.state):
-            return self.edited.new_compartment(self,
-                                               buf.get_text(buf.get_start_iter(), cursor, True),
-                                               buf.get_text(cursor, buf.get_end_iter(), True))
-        return False
-
-    def edit_backspace(self, edit, data=None):
-        print 'backspace'
-        buf = self.entry.get_buffer()
-        cursor = buf.get_iter_at_mark(buf.get_insert())
-        if cursor.equal(buf.get_start_iter()):
-            print 'Join compartments backwards'
-            return self.edited.node_view().join_compartments(self, self.edited.previous(), self.edited)
-        return False
-
-    def edit_delete_from_cursor(self, edit, delete_type, count, data=None):
-        if delete_type == Gtk.DeleteType.CHARS and count == 1:
-            print 'delete'
-            buf = self.entry.get_buffer()
-            cursor = buf.get_iter_at_mark(buf.get_insert())
-            if cursor.equal(buf.get_end_iter()):
-                print 'Join compartments forward'
-                return self.edited.node_view().join_compartments(self, self.edited, self.edited.next())
-        return False
-
-    def edit_button_press_event(self, edit, event, data=None):
-        print 'button press %d, %d' % (event.x, event.y)
-        return False
-
-    def edit_button_release_event(self, edit, event, data=None):
-        print 'button release %d, %d' % (event.x, event.y)
+            buf.insert_interactive_at_cursor(COMPARTMENT_SEPARATOR, -1, self.entry.get_editable())
+            return True
         return False
 
 
