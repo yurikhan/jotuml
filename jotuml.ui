@@ -49,6 +49,8 @@
     <property name="accel_group">accel_group</property>
     <child>
       <object class="GtkImageMenuItem" id="node_edit_item">
+        <property name="label">gtk-edit</property>
+        <property name="use_action_appearance">False</property>
         <property name="related_action">node_edit_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
@@ -57,6 +59,8 @@
     </child>
     <child>
       <object class="GtkImageMenuItem" id="node_delete_item">
+        <property name="label">gtk-delete</property>
+        <property name="use_action_appearance">False</property>
         <property name="related_action">node_delete_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
@@ -69,19 +73,23 @@
     <property name="can_focus">False</property>
     <property name="accel_group">accel_group</property>
     <child>
-      <object class="GtkImageMenuItem" id="edge_end_aggregate_item">
+      <object class="GtkCheckMenuItem" id="edge_end_aggregate_item">
+        <property name="use_action_appearance">False</property>
         <property name="related_action">edge_end_aggregate_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
-        <property name="use_stock">True</property>
+        <property name="label" translatable="yes">_Aggregate</property>
+        <property name="use_underline">True</property>
       </object>
     </child>
     <child>
-      <object class="GtkImageMenuItem" id="edge_end_composite_item">
+      <object class="GtkCheckMenuItem" id="edge_end_composite_item">
+        <property name="use_action_appearance">False</property>
         <property name="related_action">edge_end_composite_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
-        <property name="use_stock">True</property>
+        <property name="label" translatable="yes">_Composite</property>
+        <property name="use_underline">True</property>
       </object>
     </child>
     <child>
@@ -92,11 +100,13 @@
       </object>
     </child>
     <child>
-      <object class="GtkImageMenuItem" id="edge_end_navigable_item">
+      <object class="GtkCheckMenuItem" id="edge_end_navigable_item">
+        <property name="use_action_appearance">False</property>
         <property name="related_action">edge_end_navigable_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
-        <property name="use_stock">True</property>
+        <property name="label" translatable="yes">_Navigable</property>
+        <property name="use_underline">True</property>
       </object>
     </child>
     <child>
@@ -108,6 +118,8 @@
     </child>
     <child>
       <object class="GtkImageMenuItem" id="edge_end_delete_item">
+        <property name="label">gtk-delete</property>
+        <property name="use_action_appearance">False</property>
         <property name="related_action">edge_delete_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
@@ -121,6 +133,8 @@
     <property name="accel_group">accel_group</property>
     <child>
       <object class="GtkImageMenuItem" id="edge_delete_item">
+        <property name="label">gtk-delete</property>
+        <property name="use_action_appearance">False</property>
         <property name="related_action">edge_delete_action</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>
