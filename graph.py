@@ -614,69 +614,28 @@ class Model:
 
 class MainWindow(Gtk.Window):
 
-    UI_INFO = '''
-<ui>
-  <popup name="CompartmentMenu">
-    <menuitem action="EditNode"/>
-    <menuitem action="DeleteNode"/>
-  </popup>
-  <popup name="EdgeMenu">
-    <menuitem action="DeleteEdge"/>
-  </popup>
-  <popup name="EdgeEndMenu">
-    <menuitem action="Aggregate"/>
-    <menuitem action="Composite"/>
-    <separator/>
-    <menuitem action="Navigable"/>
-    <separator/>
-    <menuitem action="DeleteEdge"/>
-  </popup>
-</ui>'''
-
     def __init__(self):
-        Gtk.Window.__init__(self, title='Hello World')
+        Gtk.Window.__init__(self, title='JotUML')
         self.connect('delete_event', self.delete_event)
         self.connect('destroy', self._destroy)
+
+        builder = Gtk.Builder()
+        builder.add_from_file('jotuml.ui')
+        self.add(builder.get_object('main_box'))
+        self.drawing_area = builder.get_object('drawing_area')
+        self.aggregate_action = builder.get_object('edge_end_aggregate_action')
+        self.composite_action = builder.get_object('edge_end_composite_action')
+        self.navigability_action = builder.get_object('edge_end_navigable_action')
+        self.node_popup = builder.get_object('compartment_popup')
+        self.edge_popup = builder.get_object('edge_popup')
+        self.edge_end_popup = builder.get_object('edge_end_popup')
+        builder.connect_signals(self)
 
         self.model = Model()
         self.diagram = self.model.diagram
         self.diagram.changed = self.redraw
 
-        self.drawing_area = Gtk.Layout()
-        self.drawing_area.add_events(Gdk.EventMask.ALL_EVENTS_MASK)
-        self.drawing_area.connect('draw', self.draw)
-        self.drawing_area.connect('button-press-event', self.button_press_event)
-        self.drawing_area.connect('button-release-event', self.button_release_event)
-        self.drawing_area.connect('motion-notify-event', self.motion_notify_event)
-        self.add(self.drawing_area)
-        self.drawing_area.show()
-        self.drawing_area.set_can_focus(True)
-        self.drawing_area.grab_focus()
-
         self.entry = None
-
-        action_group = Gtk.ActionGroup('actions')
-        action_group.add_actions([('EditNode', Gtk.STOCK_EDIT, None, None, None, self.edit_node_command),
-                                  ('DeleteNode', Gtk.STOCK_DELETE, None, None, None, self.delete_node_command),
-                                  ('DeleteEdge', Gtk.STOCK_DELETE, None, None, None, self.delete_edge_command)])
-
-        self.aggregate_action = Gtk.ToggleAction('Aggregate', '_Aggregate', None, None)
-        self.composite_action = Gtk.ToggleAction('Composite', '_Composite', None, None)
-        self.navigability_action = Gtk.ToggleAction('Navigable', '_Navigable', None, None)
-        self.aggregate_action.connect('toggled', self.aggregation_toggled_command, Edge.Aggregation.AGGREGATE)
-        self.composite_action.connect('toggled', self.aggregation_toggled_command, Edge.Aggregation.COMPOSITE)
-        self.navigability_action.connect('toggled', self.navigability_toggled_command)
-        action_group.add_action(self.aggregate_action)
-        action_group.add_action(self.composite_action)
-        action_group.add_action(self.navigability_action)
-
-        self.ui_manager = Gtk.UIManager()
-        self.ui_manager.add_ui_from_string(MainWindow.UI_INFO)
-        self.ui_manager.insert_action_group(action_group)
- 
-        self.node_popup = self.ui_manager.get_widget('/CompartmentMenu')
-        self.edge_popup = self.ui_manager.get_widget('/EdgeMenu')
-        self.edge_end_popup = self.ui_manager.get_widget('/EdgeEndMenu')
 
     def edit_node_command(self, data=None):
         self.context.node_view().edit(self, None)
@@ -690,9 +649,14 @@ class MainWindow(Gtk.Window):
         self.context[0].delete()
         self.context = None
 
-    def aggregation_toggled_command(self, action, data):
+    def aggregate_toggled_command(self, action, data=None):
         if not self.context: return
-        self.context[0].set_aggregation(self.context[1].index, data if action.get_active() else Edge.Aggregation.NONE)
+        self.context[0].set_aggregation(self.context[1].index, Edge.Aggregation.AGGREGATE if action.get_active() else Edge.Aggregation.NONE)
+        self.context = None
+
+    def composite_toggled_command(self, action, data=None):
+        if not self.context: return
+        self.context[0].set_aggregation(self.context[1].index, Edge.Aggregation.COMPOSITE if action.get_active() else Edge.Aggregation.NONE)
         self.context = None
 
     def navigability_toggled_command(self, action, data=None):
