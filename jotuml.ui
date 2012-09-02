@@ -42,6 +42,88 @@
         <signal name="activate" handler="edit_node_command" swapped="no"/>
       </object>
     </child>
+    <child>
+      <object class="GtkAction" id="file_new_action">
+        <property name="label" translatable="yes">_New</property>
+        <property name="stock_id">gtk-new</property>
+      </object>
+      <accelerator key="n" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="file_open_action">
+        <property name="label" translatable="yes">_Open…</property>
+        <property name="stock_id">gtk-open</property>
+      </object>
+      <accelerator key="o" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="file_save_action">
+        <property name="label" translatable="yes">_Save</property>
+        <property name="stock_id">gtk-save</property>
+      </object>
+      <accelerator key="s" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="file_save_as_action">
+        <property name="label" translatable="yes">Save _As…</property>
+        <property name="stock_id">gtk-save-as</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkAction" id="file_quit_action">
+        <property name="label" translatable="yes">_Quit</property>
+        <property name="stock_id">gtk-quit</property>
+      </object>
+      <accelerator key="q" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_cut_action">
+        <property name="label" translatable="yes">Cu_t</property>
+        <property name="stock_id">gtk-cut</property>
+      </object>
+      <accelerator key="x" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_copy_action">
+        <property name="label" translatable="yes">_Copy</property>
+        <property name="stock_id">gtk-copy</property>
+      </object>
+      <accelerator key="c" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_paste_action">
+        <property name="label" translatable="yes">_Paste</property>
+        <property name="stock_id">gtk-paste</property>
+      </object>
+      <accelerator key="v" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_delete_action">
+        <property name="label" translatable="yes">_Delete</property>
+        <property name="stock_id">gtk-delete</property>
+      </object>
+      <accelerator key="Delete"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="help_about_action">
+        <property name="label" translatable="yes">_About JotUML</property>
+        <property name="stock_id">gtk-about</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_undo_action">
+        <property name="label" translatable="yes">_Undo</property>
+        <property name="stock_id">gtk-undo</property>
+      </object>
+      <accelerator key="z" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_redo_action">
+        <property name="label" translatable="yes">_Redo</property>
+        <property name="stock_id">gtk-redo</property>
+      </object>
+      <accelerator key="z" modifiers="GDK_SHIFT_MASK | GDK_CONTROL_MASK"/>
+    </child>
   </object>
   <object class="GtkMenu" id="compartment_popup">
     <property name="visible">True</property>
@@ -168,6 +250,7 @@
                   <object class="GtkImageMenuItem" id="file_new_item">
                     <property name="label">gtk-new</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">file_new_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -178,6 +261,7 @@
                   <object class="GtkImageMenuItem" id="file_open_item">
                     <property name="label">gtk-open</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">file_open_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -188,6 +272,7 @@
                   <object class="GtkImageMenuItem" id="file_save_item">
                     <property name="label">gtk-save</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">file_save_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -198,6 +283,7 @@
                   <object class="GtkImageMenuItem" id="file_save_as_item">
                     <property name="label">gtk-save-as</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">file_save_as_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -215,6 +301,7 @@
                   <object class="GtkImageMenuItem" id="file_quit_item">
                     <property name="label">gtk-quit</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">file_quit_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -237,6 +324,35 @@
                 <property name="visible">True</property>
                 <property name="can_focus">False</property>
                 <property name="accel_group">accel_group</property>
+                <child>
+                  <object class="GtkImageMenuItem" id="edit_undo_item">
+                    <property name="label">gtk-undo</property>
+                    <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_undo_action</property>
+                    <property name="visible">True</property>
+                    <property name="can_focus">False</property>
+                    <property name="use_underline">True</property>
+                    <property name="use_stock">True</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkImageMenuItem" id="edit_redo_item">
+                    <property name="label">gtk-redo</property>
+                    <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_redo_action</property>
+                    <property name="visible">True</property>
+                    <property name="can_focus">False</property>
+                    <property name="use_underline">True</property>
+                    <property name="use_stock">True</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparatorMenuItem" id="edit_separator1_item">
+                    <property name="use_action_appearance">False</property>
+                    <property name="visible">True</property>
+                    <property name="can_focus">False</property>
+                  </object>
+                </child>
                 <child>
                   <object class="GtkImageMenuItem" id="edit_cut_item">
                     <property name="label">gtk-cut</property>
