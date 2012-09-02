@@ -623,6 +623,11 @@ class MainWindow(Gtk.Window):
         builder.add_from_file('jotuml.ui')
         self.add(builder.get_object('main_box'))
         self.drawing_area = builder.get_object('drawing_area')
+        self.edit_action_group = builder.get_object('edit_action_group')
+        self.edit_cut_action = builder.get_object('edit_cut_action')
+        self.edit_copy_action = builder.get_object('edit_copy_action')
+        self.edit_paste_action = builder.get_object('edit_paste_action')
+        self.edit_delete_action = builder.get_object('edit_delete_action')
         self.aggregate_action = builder.get_object('edge_end_aggregate_action')
         self.composite_action = builder.get_object('edge_end_composite_action')
         self.navigability_action = builder.get_object('edge_end_navigable_action')
@@ -631,11 +636,19 @@ class MainWindow(Gtk.Window):
         self.edge_end_popup = builder.get_object('edge_end_popup')
         builder.connect_signals(self)
 
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.connect('owner-change', self.clipboard_owner_change)
+
         self.model = Model()
         self.diagram = self.model.diagram
         self.diagram.changed = self.redraw
 
         self.entry = None
+
+    def clipboard_owner_change(self, clipboard, event, data=None):
+        print 'Clipboard owner change'
+        if self.entry:
+            self.edit_paste_action.set_sensitive(clipboard.wait_is_text_available())
 
     def edit_node_command(self, data=None):
         self.context.node_view().edit(self, None)
@@ -684,10 +697,12 @@ class MainWindow(Gtk.Window):
         self.edited.edited(self, text if text is not None else buf.get_text(*buf.get_bounds(), include_hidden_chars=True), self.edited_context)
         self.entry.destroy()
         self.entry = None
+        self.edit_action_group.set_sensitive(False)
 
     def cancel_edit(self):
         self.entry.destroy()
         self.entry = None
+        self.edit_action_group.set_sensitive(False)
 
     def button_press_event(self, widget, event, data=None):
         if self.entry:
@@ -748,6 +763,32 @@ class MainWindow(Gtk.Window):
         self.entry.grab_focus()
         self.edited = subject
         self.edited_context = context
+        self.edit_action_group.set_sensitive(True)
+        buf = self.entry.get_buffer()
+        buf.connect('notify::has-selection', self.edit_has_selection)
+        self.edit_has_selection(buf, buf.get_has_selection())
+
+    def edit_cut_command(self, data=None):
+        self.entry.emit('cut-clipboard')
+        return True
+
+    def edit_copy_command(self, data=None):
+        self.entry.emit('copy-clipboard')
+        return True
+
+    def edit_paste_command(self, data=None):
+        self.entry.emit('paste-clipboard')
+        return True
+
+    def edit_delete_command(self, data=None):
+        self.entry.emit('delete-from-cursor', Gtk.DeleteType.CHARS, 0)
+        return True
+
+    def edit_has_selection(self, buf, param):
+        value = buf.get_has_selection()
+        self.edit_cut_action.set_sensitive(value)
+        self.edit_copy_action.set_sensitive(value)
+        self.edit_delete_action.set_sensitive(value)
 
     def edit_draw(self, edit, context, data=None):
         context.set_source_rgb(0, 0, 0)

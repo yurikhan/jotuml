@@ -78,34 +78,6 @@
       <accelerator key="q" modifiers="GDK_CONTROL_MASK"/>
     </child>
     <child>
-      <object class="GtkAction" id="edit_cut_action">
-        <property name="label" translatable="yes">Cu_t</property>
-        <property name="stock_id">gtk-cut</property>
-      </object>
-      <accelerator key="x" modifiers="GDK_CONTROL_MASK"/>
-    </child>
-    <child>
-      <object class="GtkAction" id="edit_copy_action">
-        <property name="label" translatable="yes">_Copy</property>
-        <property name="stock_id">gtk-copy</property>
-      </object>
-      <accelerator key="c" modifiers="GDK_CONTROL_MASK"/>
-    </child>
-    <child>
-      <object class="GtkAction" id="edit_paste_action">
-        <property name="label" translatable="yes">_Paste</property>
-        <property name="stock_id">gtk-paste</property>
-      </object>
-      <accelerator key="v" modifiers="GDK_CONTROL_MASK"/>
-    </child>
-    <child>
-      <object class="GtkAction" id="edit_delete_action">
-        <property name="label" translatable="yes">_Delete</property>
-        <property name="stock_id">gtk-delete</property>
-      </object>
-      <accelerator key="Delete"/>
-    </child>
-    <child>
       <object class="GtkAction" id="help_about_action">
         <property name="label" translatable="yes">_About JotUML</property>
         <property name="stock_id">gtk-about</property>
@@ -124,6 +96,42 @@
         <property name="stock_id">gtk-redo</property>
       </object>
       <accelerator key="z" modifiers="GDK_SHIFT_MASK | GDK_CONTROL_MASK"/>
+    </child>
+  </object>
+  <object class="GtkActionGroup" id="edit_action_group">
+    <property name="sensitive">False</property>
+    <property name="visible">False</property>
+    <child>
+      <object class="GtkAction" id="edit_cut_action">
+        <property name="label" translatable="yes">Cu_t</property>
+        <property name="stock_id">gtk-cut</property>
+        <signal name="activate" handler="edit_cut_command" swapped="no"/>
+      </object>
+      <accelerator key="x" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_copy_action">
+        <property name="label" translatable="yes">_Copy</property>
+        <property name="stock_id">gtk-copy</property>
+        <signal name="activate" handler="edit_copy_command" swapped="no"/>
+      </object>
+      <accelerator key="c" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_paste_action">
+        <property name="label" translatable="yes">_Paste</property>
+        <property name="stock_id">gtk-paste</property>
+        <signal name="activate" handler="edit_paste_command" swapped="no"/>
+      </object>
+      <accelerator key="v" modifiers="GDK_CONTROL_MASK"/>
+    </child>
+    <child>
+      <object class="GtkAction" id="edit_delete_action">
+        <property name="label" translatable="yes">_Delete</property>
+        <property name="stock_id">gtk-delete</property>
+        <signal name="activate" handler="edit_delete_command" swapped="no"/>
+      </object>
+      <accelerator key="Delete"/>
     </child>
   </object>
   <object class="GtkMenu" id="compartment_popup">
@@ -358,6 +366,7 @@
                   <object class="GtkImageMenuItem" id="edit_cut_item">
                     <property name="label">gtk-cut</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_cut_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -368,6 +377,7 @@
                   <object class="GtkImageMenuItem" id="edit_copy_item">
                     <property name="label">gtk-copy</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_copy_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -378,6 +388,7 @@
                   <object class="GtkImageMenuItem" id="edit_paste_item">
                     <property name="label">gtk-paste</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_paste_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
@@ -388,6 +399,7 @@
                   <object class="GtkImageMenuItem" id="edit_delete_item">
                     <property name="label">gtk-delete</property>
                     <property name="use_action_appearance">False</property>
+                    <property name="related_action">edit_delete_action</property>
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <property name="use_underline">True</property>
