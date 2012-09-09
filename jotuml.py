@@ -12,6 +12,11 @@ from gi.repository import Gdk
 
 
 EPSILON = 10
+NARY_DIAMOND_RADIUS = 10
+DIAMOND_SIZE = 10
+DIAMOND_ANGLE = math.pi / 6
+ARROW_SIZE = 10
+ARROW_ANGLE = math.pi / 6
 COMPARTMENT_SEPARATOR = u'\u2029'.encode('utf-8')
 
 
@@ -76,21 +81,21 @@ class Compartment:
         self.text = text
 
 
-class Edge:
+class EdgeEnd:
     class Aggregation:
         NONE = 0
         AGGREGATE = 1
         COMPOSITE = 2
 
-    def __init__(self, from_node, to_node):
-        self.from_node = from_node
-        self.from_aggregation = Edge.Aggregation.NONE
-        self.from_navigable = False
-        self.from_caption = None
-        self.to_node = to_node
-        self.to_aggregation = Edge.Aggregation.NONE
-        self.to_navigable = False
-        self.to_caption = None
+    def __init__(self, node):
+        self.node = node
+        self.aggregation = EdgeEnd.Aggregation.NONE
+        self.navigable = False
+        self.caption = None
+
+class Edge:
+    def __init__(self, nodes):
+        self.ends = [EdgeEnd(node) for node in nodes]
 
 
 class CompartmentView:
@@ -140,6 +145,17 @@ class NodeView(View):
         return (self.x - EPSILON <= x < self.x + self.w + EPSILON
                 and self.y - EPSILON <= y < self.y + self.h + EPSILON)
 
+    def distance(self, x, y):
+        p = complex(x, y)
+        corners = [complex(self.x, self.y),
+                   complex(self.x + self.w, self.y),
+                   complex(self.x + self.w, self.y + self.h),
+                   complex(self.x, self.y + self.h),
+                   complex(self.x, self.y)]
+        return (0 if self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+                else min(distance(a, b, p)
+                         for a, b in zip(corners[:-1], corners[1:])))
+
     def press(self, window, event):
         if event.button == 3: # right button: pop up contex menu
             print 'Compartment popup menu'
@@ -158,9 +174,9 @@ class NodeView(View):
             print 'Create edge'
             drag_point = complex(event.x, event.y)
             start_point = self.clamp(drag_point)
-            edge_view = self.diagram().new_edge_view(self.node, None, [start_point, drag_point])
+            edge_view = self.diagram().new_edge_view([self.node, None], [start_point, drag_point])
             window.grab([edge_view])
-            edge_view.grab([1], event)
+            edge_view.grab(EdgeView.DragCase.BINARY_END, [(0, 1)], event)
         else:
             self.edit(window, event)
 
@@ -240,7 +256,7 @@ class NodeView(View):
 
         if width != self.w or height != self.h:
             for e in self.diagram().views:
-                if isinstance(e, EdgeView) and self.node in [e.edge.from_node, e.edge.to_node]:
+                if isinstance(e, EdgeView) and self.node in [end.node for end in e.edge.ends]:
                     e.node_resizing(self, width, height)
             self.w = width
             self.h = height
@@ -275,174 +291,406 @@ class EdgeView(View):
         View.__init__(self)
         self.diagram = weakref.ref(diagram)
         self.edge = edge
-        self.path = path
+        self.paths = [path] # If two ends, contains one path. If N-ary, contains a path from diamond to each end.
+        self.diamond = None # complex(x, y) of the center of the diamond (if any)
         self.changed = DoNothing
 
+    def in_diamond(self, p):
+        return (self.diamond
+                and abs(p.real - self.diamond.real) + abs(p.imag - self.diamond.imag) < NARY_DIAMOND_RADIUS)
+
     def wants(self, x, y):
-        if not self.path:
-            return False
+        return EPSILON > self.distance(x, y)
+
+    def distance(self, x, y):
         p = complex(x, y)
-        return EPSILON > min(distance(a, b, p)
-                             for a, b in zip(self.path[:-1], self.path[1:]))
+        return 0 if self.in_diamond(p) else min(distance(a, b, p)
+                                                for path in self.paths
+                                                for a, b in zip(path[:-1], path[1:]))
 
-    def grab(self, points, event):
+    class DragCase:
+        (NONE,
+         BINARY_WHOLE,
+         BINARY_START_NODE,
+         BINARY_END_NODE,
+         NARY_END_NODE,
+         DIAMOND,
+         BINARY_START,
+         BINARY_END,
+         NARY_END,
+         DIAMOND_CONNECTION,
+         INNER_VERTEX) = range(11)
+
+    def grab(self, drag_case, points, event):
+        self.drag_case = drag_case
         self.grabbed = points
-        self.drag_points = [complex(event.x, event.y) - self.path[point] for point in points]
+        self.drag_points = ([complex(event.x, event.y) - self.paths[path_index][vertex_index] for path_index, vertex_index in points]
+                            + ([complex(event.x, event.y) - self.diamond] if self.drag_case == EdgeView.DragCase.DIAMOND else []))
 
+    # When a node is grabbed, its incident edges must move with it.
     def grab_node(self, node_view, event):
-        if node_view.node is self.edge.from_node:
-            if node_view.node is self.edge.to_node:
-                points = range(len(self.path))
-            else:
-                points = [0]
-        elif node_view.node is self.edge.to_node:
-            points = [len(self.path) - 1]
+        # Node is unrelated to this edge. Grab nothing
+        if node_view.node not in [end.node for end in self.edge.ends]:
+            return False
+        # Edge is binary, both ends at the given node. Grab all of the edge
+        if [node_view.node] * 2 == [end.node for end in self.edge.ends]:
+            self.grab(EdgeView.DragCase.BINARY_WHOLE, [(0, i) for i in range(len(self.paths[0]))], event)
+        # Edge is binary, starting at the given node. Grab start of the path
+        elif not self.diamond and node_view.node is self.edge.ends[0].node:
+            self.grab(EdgeView.DragCase.BINARY_START_NODE, [(0, 0)], event)
+        # Edge is binary, ending at the given node. Grab end of the path
+        elif not self.diamond and node_view.node is self.edge.ends[1].node:
+            self.grab(EdgeView.DragCase.BINARY_END_NODE, [(0, len(self.paths[0]) - 1)], event)
+        # Otherwise, grab end of each path to node
         else:
-            return None
-        self.grab(points, event)
-        return points
+            self.grab(EdgeView.DragCase.NARY_END_NODE,
+                      [(i, len(self.paths[i]) - 1)
+                       for i in range(len(self.edge.ends))
+                       if self.edge.ends[i].node is node_view.node],
+                      event)
+        return True
+
+    def grab_diamond(self, event):
+        points = [(i, 0) for i, path in enumerate(self.paths)]
+        self.grab(EdgeView.DragCase.DIAMOND, points, event)
 
     class HitTest:
         class Vertex:
-            def __init__(self, index):
-                self.index = index
+            def __init__(self, path_index, vertex_index):
+                self.path_index = path_index
+                self.vertex_index = vertex_index
         class End(Vertex):
-            def __init__(self, index):
-                EdgeView.HitTest.Vertex.__init__(self, index)
+            def __init__(self, path_index, vertex_index, end_index):
+                EdgeView.HitTest.Vertex.__init__(self, path_index, vertex_index)
+                self.end_index = end_index
         class Segment:
-            def __init__(self, index):
-                self.index = index
+            def __init__(self, path_index, vertex_index):
+                self.path_index = path_index
+                self.vertex_index = vertex_index
+        class Diamond:
+            def __init__(self):
+                pass
 
-    def hittest(self, point):
-        for i in range(len(self.path)):
-            if abs(point - self.path[i]) < EPSILON: # on a vertex: move vertex
-                if i in [0, len(self.path) - 1]:
-                    return EdgeView.HitTest.End(i)
-                else:
-                    return EdgeView.HitTest.Vertex(i)
-        for i in range(len(self.path) - 1):
-            if distance(self.path[i], self.path[i + 1], point) < EPSILON: # on a segment: add vertex
-                return EdgeView.HitTest.Segment(i)
+    def hittest(self, point, excluded_path_index=None):
+        if self.in_diamond(point):
+            return EdgeView.HitTest.Diamond()
+        diamond_points = [self.diamond + complex(NARY_DIAMOND_RADIUS, 0),
+                          self.diamond + complex(0, NARY_DIAMOND_RADIUS),
+                          self.diamond + complex(-NARY_DIAMOND_RADIUS, 0),
+                          self.diamond + complex(0, -NARY_DIAMOND_RADIUS),
+                          self.diamond + complex(NARY_DIAMOND_RADIUS, 0)] if self.diamond else None
+        for path_index, path in enumerate(self.paths):
+            if path_index == excluded_path_index:
+                continue
+            for i in range(len(path)):
+                if abs(point - path[i]) < EPSILON: # on a vertex: move vertex
+                    if i == len(path) - 1 or i == 0 and not self.diamond:
+                        return EdgeView.HitTest.End(path_index, i, path_index if self.diamond or i == 0 else 1)
+                    else:
+                        return EdgeView.HitTest.Vertex(path_index, i)
+            if (self.diamond
+                and distance(path[0], path[1], point) < EPSILON
+                and min(distance(a, b, point) for a, b in zip(diamond_points[:-1], diamond_points[1:])) < EPSILON):
+                return EdgeView.HitTest.Vertex(path_index, 0)
+            for i in range(len(path) - 1):
+                if distance(path[i], path[i + 1], point) < EPSILON: # on a segment: add vertex
+                    return EdgeView.HitTest.Segment(path_index, i)
+
+    def snap(self, point):
+        hittest = self.hittest(point)
+        if isinstance(hittest, EdgeView.HitTest.Diamond):
+            return self.diamond
+        elif isinstance(hittest, EdgeView.HitTest.Segment):
+            return projection(self.paths[hittest.path_index][hittest.vertex_index],
+                              self.paths[hittest.path_index][hittest.vertex_index + 1],
+                              point)
+        else:
+            return self.paths[hittest.path_index][hittest.vertex_index]
 
     def set_aggregation(self, end, value):
         print 'Set aggregation at', end, 'to', value
-        if end == 0:
-            self.edge.from_aggregation = value
-        else:
-            self.edge.to_aggregation = value
+        self.edge.ends[end].aggregation = value
         self.changed(self)
 
     def set_navigability(self, end, value):
         print 'Set navigability at', end, 'to', value
-        if end == 0:
-            self.edge.from_navigable = value
-        else:
-            self.edge.to_navigable = value
+        self.edge.ends[end].navigable = value
         self.changed(self)
 
     def press(self, window, event):
+        if window.grabbed:
+            return
         if event.button == 1:
             hittest = self.hittest(complex(event.x, event.y))
             if isinstance(hittest, EdgeView.HitTest.End):
                 print 'Edit end'
-                end = self.path[hittest.index]
-                caption = (self.edge.from_caption if hittest.index == 0 else self.edge.to_caption) or ''
-                window.edit(self, caption, end.real, end.imag, 80, 22, hittest.index)
+                end = self.paths[hittest.path_index][hittest.vertex_index]
+                caption = self.edge.ends[hittest.end_index].caption or ''
+                window.edit(self, caption, end.real, end.imag, 80, 22, hittest)
                 buf = window.entry.get_buffer()
                 buf.place_cursor(buf.get_end_iter())
+                return
+            else:
+                print 'Add path'
+                point = complex(event.x, event.y)
+                self.ensure_diamond(point)
+                self.edge.ends.append(EdgeEnd(None))
+                self.paths.append([self.diamond, point])
+                self.grab(EdgeView.DragCase.NARY_END, [(len(self.paths) - 1, 1)], event)
+                window.grab([self])
                 return
         elif event.button == 2:
             point = complex(event.x, event.y)
             hittest = self.hittest(point)
             if isinstance(hittest, EdgeView.HitTest.Vertex):
                 print 'Move vertex'
-                self.grab([hittest.index], event)
+                if self.diamond and hittest.vertex_index == 0:
+                    self.paths[hittest.path_index][hittest.vertex_index] = complex(event.x, event.y)
+                self.grab(EdgeView.DragCase.BINARY_START if not self.diamond and hittest.vertex_index == 0
+                          else EdgeView.DragCase.BINARY_END if not self.diamond and hittest.vertex_index == len(self.paths[0]) - 1
+                          else EdgeView.DragCase.NARY_END if hittest.vertex_index == len(self.paths[hittest.path_index]) - 1
+                          else EdgeView.DragCase.DIAMOND_CONNECTION if hittest.vertex_index == 0
+                          else EdgeView.DragCase.INNER_VERTEX,
+                          [(hittest.path_index, hittest.vertex_index)], event)
                 window.grab([self])
                 return
             if isinstance(hittest, EdgeView.HitTest.Segment):
                 print 'Add vertex'
-                self.path.insert(hittest.index + 1, point)
-                self.grab([hittest.index + 1], event)
+                self.paths[hittest.path_index].insert(hittest.vertex_index + 1, point)
+                self.grab(EdgeView.DragCase.INNER_VERTEX, [(hittest.path_index, hittest.vertex_index + 1)], event)
+                window.grab([self])
+                return
+            if isinstance(hittest, EdgeView.HitTest.Diamond):
+                print 'Move diamond'
+                self.grab_diamond(event)
                 window.grab([self])
                 return
         elif event.button == 3:
             hittest = self.hittest(complex(event.x, event.y))
             if isinstance(hittest, EdgeView.HitTest.End):
                 print 'End context menu'
-                aggregation = self.edge.from_aggregation if hittest.index == 0 else self.edge.to_aggregation
-                window.aggregate_action.set_active(aggregation == Edge.Aggregation.AGGREGATE)
-                window.composite_action.set_active(aggregation == Edge.Aggregation.COMPOSITE)
-                window.navigability_action.set_active(self.edge.from_navigable if hittest.index == 0 else self.edge.to_navigable)
+                aggregation = self.edge.ends[hittest.end_index].aggregation
+                window.aggregate_action.set_active(aggregation == EdgeEnd.Aggregation.AGGREGATE)
+                window.composite_action.set_active(aggregation == EdgeEnd.Aggregation.COMPOSITE)
+                window.navigability_action.set_active(self.edge.ends[hittest.end_index].navigable)
+                window.edge_path_delete_action.set_visible(self.diamond is not None)
                 window.context = (self, hittest)
                 window.edge_end_popup.popup(None, None, None, None, 3, event.time)
-            else:
+            elif isinstance(hittest, EdgeView.HitTest.Diamond) or not self.diamond:
                 print 'Edge context menu'
+                window.edge_path_delete_action.set_visible(False)
+                window.context = (self, hittest)
+                window.edge_popup.popup(None, None, None, None, 3, event.time)
+            else:
+                print 'Path context menu'
+                window.edge_path_delete_action.set_visible(True)
                 window.context = (self, hittest)
                 window.edge_popup.popup(None, None, None, None, 3, event.time)
             return
 
-    def edited(self, window, text, index):
+    def edited(self, window, text, hittest):
         print 'Edited end'
-        if index == 0:
-            self.edge.from_caption = text
-        else:
-            self.edge.to_caption = text
+        self.edge.ends[hittest.end_index].caption = text
         self.changed(self)
 
     def delete(self):
         print 'Delete edge'
         self.diagram().model().delete_edge(self.edge)
 
+    def delete_path(self, path_index):
+        assert self.diamond
+        self.paths.pop(path_index)
+        self.edge.ends.pop(path_index)
+        self.check_diamond_necessity()
+        self.changed(self)
+
+    def delete_paths(self, node):
+        if not self.diamond and node in (end.node for end in self.edge.ends):
+            self.delete()
+        else:
+            for path, end in zip(self.paths[:], self.edge.ends[:]):
+                if end.node is node:
+                    print 'Remove path'
+                    self.edge.ends.remove(end)
+                    self.paths.remove(path)
+            if len(self.edge.ends) < 2:
+                self.delete()
+            self.check_diamond_necessity()
+            self.changed(self)
+
     def motion(self, window, event):
         if self.grabbed is not None:
-            for i in range(len(self.grabbed)):
-                self.path[self.grabbed[i]] = complex(event.x, event.y) - self.drag_points[i]
+            for (path_index, vertex_index), drag_point in zip(self.grabbed, self.drag_points):
+                self.paths[path_index][vertex_index] = complex(event.x, event.y) - drag_point
+            if self.drag_case == EdgeView.DragCase.DIAMOND:
+                self.diamond = complex(event.x, event.y) - self.drag_points[-1]
             self.changed(self)
+
+    def ensure_diamond(self, point):
+        if not self.diamond:
+            print 'Create diamond'
+            # Create a diamond at the attachment point
+            hittest = self.hittest(point)
+            self.diamond = snap_point(self.snap(point))
+            if isinstance(hittest, EdgeView.HitTest.Segment):
+                self.paths = [[self.diamond] + list(reversed(self.paths[0][:hittest.vertex_index + 1])),
+                              [self.diamond] + self.paths[0][hittest.vertex_index + 1:]]
+            else: # put diamond instead of vertex
+                assert not isinstance(hittest, EdgeView.HitTest.End)
+                self.paths = [[self.diamond] + list(reversed(self.paths[0][:hittest.vertex_index])),
+                              [self.diamond] + self.paths[0][hittest.vertex_index + 1:]]
+
+    def check_diamond_necessity(self):
+        if self.diamond and len(self.edge.ends) == 2:
+            self.paths = ([list(reversed(self.paths[0][1:]))
+                           + ([self.diamond] if distance(self.paths[0][1], self.paths[1][1], self.diamond) >= EPSILON else [])
+                           + self.paths[1][1:]])
+            self.diamond = None
 
     def release(self, window, event):
         points = [complex(event.x, event.y) - point for point in self.drag_points]
-        if self.grabbed == [0] or self.grabbed == [len(self.path) - 1]:
-            node_views = self.diagram().node_views_at(event.x, event.y)
-            if len(node_views) > 1: # ambiguous: continue
-                print 'Cannot choose which node to attach to'
-                return
-            if node_views: # at a node: (re)attach to it
-                print 'Attach to node'
-                if self.grabbed == [0]:
-                    self.edge.from_node = node_views[0].node
-                else:
-                    self.edge.to_node = node_views[0].node
-                self.path[self.grabbed[0]] = snap_point(node_views[0].clamp(points[0]))
-                self.changed(self)
-                window.ungrab()
-            else: # nowhere: add segment at end
-                print 'Add segment'
-                self.path[self.grabbed[0]] = snap_point(points[0])
-                if self.grabbed == [0]:
-                    self.path = points + self.path
-                else:
-                    self.path = self.path + points
-                    self.grabbed[0] += 1
-                self.changed(self)
-        elif len(self.grabbed) == 1: # dragging an inner vertex
-            print 'Moved vertex'
-            self.path[self.grabbed[0]] = snap_point(points[0])
-            if min(abs(points[0] - self.path[self.grabbed[0] + i]) for i in [-1, 1]) < EPSILON: # near an adjacent vertex: meld with it
-                print 'Deleted segment'
-                self.path.pop(self.grabbed[0])
-            self.changed(self)
-            window.ungrab()
-        else: # dragging the whole edge
+        if self.drag_case in (EdgeView.DragCase.BINARY_WHOLE,
+                              EdgeView.DragCase.BINARY_START_NODE,
+                              EdgeView.DragCase.BINARY_END_NODE,
+                              EdgeView.DragCase.NARY_END_NODE,
+                              EdgeView.DragCase.DIAMOND): # No topology change, just snap points to grid
             print 'Moved edge'
-            for i in range(len(self.grabbed)):
-                self.path[self.grabbed[i]] = [snap_point(p) for p in points[i]]
+            for (path_index, vertex_index), p in zip(self.grabbed, points):
+                self.paths[path_index][vertex_index] = snap_point(p)
             self.changed(self)
+            self.grabbed = None
             window.ungrab()
+        elif self.drag_case in (EdgeView.DragCase.BINARY_START,
+                                EdgeView.DragCase.BINARY_END,
+                                EdgeView.DragCase.NARY_END):
+            point = points[0]
+            path_index, vertex_index = self.grabbed[0]
+            assert path_index == 0 or self.drag_case == EdgeView.DragCase.NARY_END
+            assert vertex_index == (0 if self.drag_case == EdgeView.DragCase.BINARY_START else len(self.paths[path_index]) - 1)
+            next_vertex, vertex_after = (1, 2) if vertex_index == 0 else (-2, -3)
+            end_index = (0 if self.drag_case == EdgeView.DragCase.BINARY_START
+                         else 1 if self.drag_case == EdgeView.DragCase.BINARY_END
+                         else path_index)
+            # Binary edge end can reattach to another node or a different edge. N-ary edge end can only reattach to a node
+            attach_to = self.diagram().attachable_at(event.x, event.y, self) if self.drag_case != EdgeView.DragCase.NARY_END else self.diagram().node_view_at(event.x, event.y)
+            if isinstance(attach_to, NodeView): # at a node: (re)attach to it
+                self.edge.ends[end_index].node = attach_to.node
+                self.paths[path_index][vertex_index] = snap_point(attach_to.clamp(point))
+                self.changed(self)
+                self.grabbed = None
+                window.ungrab()
+            elif isinstance(attach_to, EdgeView):
+                print 'Attach to edge'
+                attach_to.ensure_diamond(point)
+                attach_to.edge.ends.append(self.edge.ends[1 - end_index])
+                attach_to.paths.append(self.paths[0] if self.drag_case == EdgeView.DragCase.BINARY_START else list(reversed(self.paths[0])))
+                attach_to.paths[-1][0] = attach_to.diamond
+                attach_to.changed(self)
+                print 'Delete old edge'
+                self.delete()
+                window.ungrab()
+            elif len(self.paths[path_index]) > 2 and distance(self.paths[path_index][next_vertex], self.paths[path_index][vertex_after], point) < EPSILON:
+                print 'Delete segment'
+                self.paths[path_index].pop(next_vertex)
+                self.changed(self)
+            else:
+                # nowhere: add segment at end
+                print 'Add segment'
+                self.paths[path_index][vertex_index] = snap_point(point)
+                if vertex_index == 0:
+                    self.paths[path_index] = points + self.paths[path_index]
+                else:
+                    self.paths[path_index] = self.paths[path_index] + points
+                    self.grabbed[0] = (self.grabbed[0][0], self.grabbed[0][1] + 1)
+                self.changed(self)
+        elif self.drag_case == EdgeView.DragCase.DIAMOND_CONNECTION:
+            point = points[0]
+            path_index, vertex_index = self.grabbed[0]
+            assert vertex_index == 0
+            next_vertex, vertex_after = (1, 2)
+            end_index = path_index
+            # Can reattach to a node (detaching path into a new edge), to the remainder of the same edge (canceling detachment) or to a different edge
+            attach_to = self.diagram().attachable_at(event.x, event.y, self)
+            if isinstance(attach_to, NodeView): # at a node: reattach to it
+                new_edge_view = self.diagram().new_edge_view([self.edge.ends[end_index].node, attach_to.node], list(reversed(self.paths[path_index])))
+                new_edge_view.paths[0][-1] = snap_point(attach_to.clamp(point))
+                new_edge_view.edge.ends[0].aggregation = self.edge.ends[end_index].aggregation
+                new_edge_view.edge.ends[0].navigable = self.edge.ends[end_index].navigable
+                new_edge_view.edge.ends[0].caption = self.edge.ends[end_index].caption
+                self.edge.ends.pop(end_index)
+                self.paths.pop(path_index)
+                self.check_diamond_necessity()
+                new_edge_view.changed(self)
+                self.changed(self)
+                self.grabbed = None
+                window.ungrab()
+            elif isinstance(attach_to, EdgeView): # other edge
+                attach_to.ensure_diamond(point)
+                attach_to.edge.ends.append(self.edge.ends[end_index])
+                attach_to.paths.append(self.paths[path_index])
+                attach_to.paths[-1][0] = attach_to.diamond
+                attach_to.changed(self)
+                self.edge.ends.pop(end_index)
+                self.paths.pop(path_index)
+                self.check_diamond_necessity()
+                self.changed(self)
+                self.grabbed = None
+                window.ungrab()
+            elif self.hittest(point, path_index): # reattach to the same edge
+                print 'Reattach back'
+                self.paths[path_index][vertex_index] = self.diamond
+                self.changed(self)
+                self.grabbed = None
+                window.ungrab()
+            elif len(self.paths[path_index]) > 2 and distance(self.paths[path_index][next_vertex], self.paths[path_index][vertex_after], point) < EPSILON:
+                print 'Delete segment'
+                self.paths[path_index].pop(next_vertex)
+                self.changed(self)
+            else:
+                # nowhere: add segment at end
+                print 'Add segment'
+                self.paths[path_index][vertex_index] = snap_point(point)
+                self.paths[path_index] = points + self.paths[path_index]
+                self.changed(self)
+        elif self.drag_case == EdgeView.DragCase.INNER_VERTEX:
+            point = points[0]
+            path_index, vertex_index = self.grabbed[0]
+            if (vertex_index >= 1
+                and distance(self.paths[path_index][max(0, vertex_index - 2)],
+                             self.paths[path_index][vertex_index - 1], point) < EPSILON):
+                print 'Delete segment'
+                self.paths[path_index].pop(vertex_index - 1)
+                self.grabbed[0] = (path_index, vertex_index - 1)
+                self.changed(self)
+            elif (vertex_index + 2 < len(self.paths[path_index])
+                  and distance(self.paths[path_index][min(len(self.paths[path_index]) - 1, vertex_index + 2)],
+                               self.paths[path_index][vertex_index + 1], point) < EPSILON):
+                print 'Delete segment'
+                self.paths[path_index].pop(vertex_index + 1)
+                self.changed(self)
+            else:
+                print 'Move vertex'
+                self.paths[path_index][vertex_index] = snap_point(point)
+                self.changed(self)
+                self.grabbed = None
+                window.ungrab()
+        else:
+            assert False, 'Unhandled drag case'
+
+    def draw_nary_diamond(self, context):
+        z = self.diamond
+        context.move_to(z.real - NARY_DIAMOND_RADIUS, z.imag)
+        context.line_to(z.real, z.imag + NARY_DIAMOND_RADIUS)
+        context.line_to(z.real + NARY_DIAMOND_RADIUS, z.imag)
+        context.line_to(z.real, z.imag - NARY_DIAMOND_RADIUS)
+        context.close_path()
+        context.set_source_rgb(255, 255, 255)
+        context.fill_preserve()
+        context.set_source_rgb(0, 0, 0)
+        context.stroke()
 
     def draw_diamond(self, context, a, b, fill):
         phi = cmath.phase(b - a)
-        DIAMOND_SIZE = 10
-        DIAMOND_ANGLE = math.pi / 6
         rels = [cmath.rect(DIAMOND_SIZE, phi + DIAMOND_ANGLE), cmath.rect(DIAMOND_SIZE, phi - DIAMOND_ANGLE), cmath.rect(-DIAMOND_SIZE, phi + DIAMOND_ANGLE)]
         context.move_to(a.real, a.imag)
         for rel in rels:
@@ -456,8 +704,6 @@ class EdgeView(View):
 
     def draw_arrow(self, context, a, b):
         phi = cmath.phase(b - a)
-        ARROW_SIZE = 10
-        ARROW_ANGLE = math.pi / 6
         c, d = [a + cmath.rect(ARROW_SIZE, phi + ARROW_ANGLE), a + cmath.rect(ARROW_SIZE, phi - ARROW_ANGLE)]
         context.move_to(c.real, c.imag)
         context.line_to(a.real, a.imag)
@@ -485,32 +731,44 @@ class EdgeView(View):
         context.identity_matrix()
 
     def draw(self, context):
-        if not self.path:
-            return
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
 
-        path = self.path[:]
+        if not self.diamond:
+            path = self.paths[0][:]
 
-        if self.edge.from_aggregation:
-            path[0] = self.draw_diamond(context, path[0], path[1], self.edge.from_aggregation)
-        if self.edge.to_aggregation:
-            path[-1] = self.draw_diamond(context, path[-1], path[-2], self.edge.to_aggregation)
+            if self.edge.ends[0].aggregation:
+                path[0] = self.draw_diamond(context, path[0], path[1], self.edge.ends[0].aggregation)
+            if self.edge.ends[1].aggregation:
+                path[-1] = self.draw_diamond(context, path[-1], path[-2], self.edge.ends[1].aggregation)
 
-        if self.edge.from_navigable:
-            self.draw_arrow(context, path[0], path[1])
-        if self.edge.to_navigable:
-            self.draw_arrow(context, path[-1], path[-2])
+            if self.edge.ends[0].navigable:
+                self.draw_arrow(context, path[0], path[1])
+            if self.edge.ends[1].navigable:
+                self.draw_arrow(context, path[-1], path[-2])
 
-        context.move_to(path[0].real, path[0].imag)
-        for z in path[1:]:
-            context.line_to(z.real, z.imag)
-        context.stroke()
+            context.move_to(path[0].real, path[0].imag)
+            for z in path[1:]:
+                context.line_to(z.real, z.imag)
+            context.stroke()
 
-        if self.edge.from_caption:
-            self.draw_caption(context, path[0], path[1], self.edge.from_caption or '')
-        if self.edge.to_caption:
-            self.draw_caption(context, path[-1], path[-2], self.edge.to_caption or '')
+            if self.edge.ends[0].caption:
+                self.draw_caption(context, path[0], path[1], self.edge.ends[0].caption or '')
+            if self.edge.ends[1].caption:
+                self.draw_caption(context, path[-1], path[-2], self.edge.ends[1].caption or '')
+        else:
+            for p, end in zip(self.paths, self.edge.ends):
+                path = p[:]
+
+                if end.aggregation:
+                    path[-1] = self.draw_diamond(context, path[-1], path[-2], end.aggregation)
+                if end.navigable:
+                    self.draw_arrow(context, path[-1], path[-2])
+                context.move_to(path[0].real, path[0].imag)
+                for z in path[1:]:
+                    context.line_to(z.real, z.imag)
+                context.stroke()
+            self.draw_nary_diamond(context)
 
     def node_resizing(self, node_view, new_width, new_height):
         end = 0 if node_view.node is self.edge.from_node else -1
@@ -537,11 +795,31 @@ class Diagram:
         return [view for view in self.views
                 if isinstance(view, NodeView) and view.wants(x, y)]
 
-    def edge_view_at(self, x, y):
-        for view in self.views:
-            if isinstance(view, EdgeView) and view.wants(x, y):
-                return view
+    def node_view_at(self, x, y):
+        node_views = self.node_views_at(x, y)
+        if len(node_views) > 1:
+            print 'Cannot decide which node to attach to'
+            return None
+        if node_views:
+            print 'Attach to node'
+            return node_views[0]
         return None
+
+    def attachable_at(self, x, y, excluded):
+        node_view = self.node_view_at(x, y)
+        if node_view:
+            return node_view
+        edge_view = self.edge_view_at(x, y, excluded)
+        if edge_view:
+            print 'Attach to edge'
+            return edge_view
+        return None
+
+    def edge_view_at(self, x, y, excluded=None):
+        candidates = [(view.distance(x, y), view)
+                      for view in self.views
+                      if isinstance(view, EdgeView) and view is not excluded and view.wants(x, y)]
+        return min(candidates)[1] if candidates else None
 
     def new_node_view(self, x, y, w=50, h=22):
         node = self.model().new_node()
@@ -551,8 +829,8 @@ class Diagram:
         self.changed(self)
         return view
 
-    def new_edge_view(self, from_node, to_node, path):
-        edge = self.model().new_edge(from_node, to_node)
+    def new_edge_view(self, nodes, path):
+        edge = self.model().new_edge(nodes)
         view = EdgeView(self, edge, path)
         view.changed = self.changed
         self.views.append(view)
@@ -569,6 +847,12 @@ class Diagram:
         for view in self.views[:]:
             if isinstance(view, EdgeView) and view.edge is edge:
                 self.delete_view(view)
+        self.changed(self)
+
+    def delete_paths(self, node):
+        for view in self.views[:]:
+            if isinstance(view, EdgeView):
+                view.delete_paths(node)
         self.changed(self)
 
     def delete_view(self, view):
@@ -589,22 +873,21 @@ class Model:
         self.changed(self)
         return node
 
-    def new_edge(self, from_node, to_node=None):
-        edge = Edge(from_node, to_node)
+    def new_edge(self, nodes):
+        edge = Edge(nodes)
         self.edges.append(edge)
         self.changed(self)
         return edge
 
     def delete_node(self, node):
-        self.delete_edges(node)
+        self.delete_paths(node)
         self.diagram.delete_node(node)
         self.nodes.remove(node)
         self.changed(self)
 
-    def delete_edges(self, node):
-        for edge in self.edges[:]:
-            if node in [edge.from_node, edge.to_node]:
-                self.delete_edge(edge)
+    def delete_paths(self, node):
+        self.diagram.delete_paths(node)
+        self.changed(self)
 
     def delete_edge(self, edge):
         self.diagram.delete_edge(edge)
@@ -631,6 +914,7 @@ class MainWindow(Gtk.Window):
         self.aggregate_action = builder.get_object('edge_end_aggregate_action')
         self.composite_action = builder.get_object('edge_end_composite_action')
         self.navigability_action = builder.get_object('edge_end_navigable_action')
+        self.edge_path_delete_action = builder.get_object('edge_path_delete_action')
         self.node_popup = builder.get_object('compartment_popup')
         self.edge_popup = builder.get_object('edge_popup')
         self.edge_end_popup = builder.get_object('edge_end_popup')
@@ -662,19 +946,23 @@ class MainWindow(Gtk.Window):
         self.context[0].delete()
         self.context = None
 
+    def delete_edge_path_command(self, data=None):
+        self.context[0].delete_path(self.context[1].path_index)
+        self.context = None
+
     def aggregate_toggled_command(self, action, data=None):
         if not self.context: return
-        self.context[0].set_aggregation(self.context[1].index, Edge.Aggregation.AGGREGATE if action.get_active() else Edge.Aggregation.NONE)
+        self.context[0].set_aggregation(self.context[1].end_index, EdgeEnd.Aggregation.AGGREGATE if action.get_active() else EdgeEnd.Aggregation.NONE)
         self.context = None
 
     def composite_toggled_command(self, action, data=None):
         if not self.context: return
-        self.context[0].set_aggregation(self.context[1].index, Edge.Aggregation.COMPOSITE if action.get_active() else Edge.Aggregation.NONE)
+        self.context[0].set_aggregation(self.context[1].end_index, EdgeEnd.Aggregation.COMPOSITE if action.get_active() else EdgeEnd.Aggregation.NONE)
         self.context = None
 
     def navigability_toggled_command(self, action, data=None):
         if not self.context: return
-        self.context[0].set_navigability(self.context[1].index, action.get_active())
+        self.context[0].set_navigability(self.context[1].end_index, action.get_active())
         self.context = None
 
     def redraw(self, what):
