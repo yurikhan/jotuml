@@ -104,6 +104,36 @@
         <signal name="activate" handler="delete_edge_path_command" swapped="no"/>
       </object>
     </child>
+    <child>
+      <object class="GtkToggleAction" id="edge_end_generalization_action">
+        <property name="label" translatable="yes">_Generalization</property>
+        <signal name="toggled" handler="generalization_toggled_command" swapped="no"/>
+      </object>
+    </child>
+    <child>
+      <object class="GtkToggleAction" id="edge_end_realization_action">
+        <property name="label" translatable="yes">_Realization</property>
+        <signal name="toggled" handler="realization_toggled_command" swapped="no"/>
+      </object>
+    </child>
+    <child>
+      <object class="GtkToggleAction" id="edge_end_dependency_action">
+        <property name="label" translatable="yes">D_ependency</property>
+        <signal name="toggled" handler="dependency_toggled_command" swapped="no"/>
+      </object>
+    </child>
+    <child>
+      <object class="GtkToggleAction" id="edge_end_scope_action">
+        <property name="label" translatable="yes">_Scope</property>
+        <signal name="toggled" handler="scope_toggled_command" swapped="no"/>
+      </object>
+    </child>
+    <child>
+      <object class="GtkToggleAction" id="edge_path_association_class_action">
+        <property name="label" translatable="yes">Association C_lass</property>
+        <signal name="toggled" handler="association_class_toggled_command" swapped="no"/>
+      </object>
+    </child>
   </object>
   <object class="GtkActionGroup" id="edit_action_group">
     <property name="sensitive">False</property>
@@ -211,6 +241,63 @@
     </child>
     <child>
       <object class="GtkSeparatorMenuItem" id="edge_end_separator2_item">
+        <property name="use_action_appearance">False</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCheckMenuItem" id="edge_end_generalization_item">
+        <property name="use_action_appearance">False</property>
+        <property name="related_action">edge_end_generalization_action</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">_Generalization</property>
+        <property name="use_underline">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCheckMenuItem" id="edge_end_realization_item">
+        <property name="use_action_appearance">False</property>
+        <property name="related_action">edge_end_realization_action</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">_Realization</property>
+        <property name="use_underline">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCheckMenuItem" id="edge_end_dependency_item">
+        <property name="use_action_appearance">False</property>
+        <property name="related_action">edge_end_dependency_action</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">D_ependency</property>
+        <property name="use_underline">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCheckMenuItem" id="edge_end_scope_item">
+        <property name="use_action_appearance">False</property>
+        <property name="related_action">edge_end_scope_action</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">_Scope</property>
+        <property name="use_underline">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkCheckMenuItem" id="edge_path_association_class_item">
+        <property name="use_action_appearance">False</property>
+        <property name="related_action">edge_path_association_class_action</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">Association C_lass</property>
+        <property name="use_underline">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkSeparatorMenuItem" id="edge_end_separator3_item">
         <property name="use_action_appearance">False</property>
         <property name="visible">True</property>
         <property name="can_focus">False</property>

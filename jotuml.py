@@ -13,10 +13,14 @@ from gi.repository import Gdk
 
 EPSILON = 10
 NARY_DIAMOND_RADIUS = 10
+ANCHOR_RADIUS = 5
 DIAMOND_SIZE = 10
 DIAMOND_ANGLE = math.pi / 6
+TRIANGLE_SIZE = 10
+TRIANGLE_ANGLE = math.pi / 6
 ARROW_SIZE = 10
 ARROW_ANGLE = math.pi / 6
+DASH_SIZE = 5
 COMPARTMENT_SEPARATOR = u'\u2029'.encode('utf-8')
 
 
@@ -83,12 +87,21 @@ class Compartment:
 
 class EdgeEnd:
     class Aggregation:
-        NONE = 0
-        AGGREGATE = 1
-        COMPOSITE = 2
+        (NONE,
+         AGGREGATE,
+         COMPOSITE) = range(3)
+
+    class Kind:
+        (ASSOCIATION,
+         ASSOCIATION_CLASS,
+         GENERALIZATION,
+         REALIZATION,
+         DEPENDENCY,
+         NESTING) = range(6)
 
     def __init__(self, node):
         self.node = node
+        self.kind = EdgeEnd.Kind.ASSOCIATION
         self.aggregation = EdgeEnd.Aggregation.NONE
         self.navigable = False
         self.caption = None
@@ -155,6 +168,14 @@ class NodeView(View):
         return (0 if self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
                 else min(distance(a, b, p)
                          for a, b in zip(corners[:-1], corners[1:])))
+
+    def side(self, x, y):
+        corners = [complex(self.x, self.y),
+                   complex(self.x + self.w, self.y),
+                   complex(self.x + self.w, self.y + self.h),
+                   complex(self.x, self.y + self.h),
+                   complex(self.x, self.y)]
+        return min([distance(a, b, p), a, b] for a, b in zip(corners[:-1], corners[1:]))[1:]
 
     def press(self, window, event):
         if event.button == 3: # right button: pop up contex menu
@@ -417,6 +438,11 @@ class EdgeView(View):
         self.edge.ends[end].navigable = value
         self.changed(self)
 
+    def set_kind(self, end, value):
+        print 'Set kind at', end, 'to', value
+        self.edge.ends[end].kind = value
+        self.changed(self)
+
     def press(self, window, event):
         if window.grabbed:
             return
@@ -473,6 +499,13 @@ class EdgeView(View):
                 window.aggregate_action.set_active(aggregation == EdgeEnd.Aggregation.AGGREGATE)
                 window.composite_action.set_active(aggregation == EdgeEnd.Aggregation.COMPOSITE)
                 window.navigability_action.set_active(self.edge.ends[hittest.end_index].navigable)
+                kind = self.edge.ends[hittest.end_index].kind
+                window.generalization_action.set_active(kind == EdgeEnd.Kind.GENERALIZATION)
+                window.realization_action.set_active(kind == EdgeEnd.Kind.REALIZATION)
+                window.dependency_action.set_active(kind == EdgeEnd.Kind.DEPENDENCY)
+                window.scope_action.set_active(kind == EdgeEnd.Kind.NESTING)
+                window.association_class_action.set_active(kind == EdgeEnd.Kind.ASSOCIATION_CLASS)
+                window.association_class_action.set_visible(self.diamond is not None)
                 window.edge_path_delete_action.set_visible(self.diamond is not None)
                 window.context = (self, hittest)
                 window.edge_end_popup.popup(None, None, None, None, 3, event.time)
@@ -572,7 +605,9 @@ class EdgeView(View):
                          else 1 if self.drag_case == EdgeView.DragCase.BINARY_END
                          else path_index)
             # Binary edge end can reattach to another node or a different edge. N-ary edge end can only reattach to a node
-            attach_to = self.diagram().attachable_at(event.x, event.y, self) if self.drag_case != EdgeView.DragCase.NARY_END else self.diagram().node_view_at(event.x, event.y)
+            attach_to = (self.diagram().attachable_at(event.x, event.y, self)
+                         if self.drag_case != EdgeView.DragCase.NARY_END
+                         else self.diagram().node_view_at(event.x, event.y))
             if isinstance(attach_to, NodeView): # at a node: (re)attach to it
                 self.edge.ends[end_index].node = attach_to.node
                 self.paths[path_index][vertex_index] = snap_point(attach_to.clamp(point))
@@ -689,9 +724,22 @@ class EdgeView(View):
         context.set_source_rgb(0, 0, 0)
         context.stroke()
 
+    def draw_anchor(self, context, a, b):
+        phi = cmath.phase(b - a)
+        center = a + cmath.rect(ANCHOR_RADIUS, phi)
+        context.arc(center.real, center.imag, ANCHOR_RADIUS, 0, 2 * math.pi)
+        context.move_to(center.real - ANCHOR_RADIUS, center.imag)
+        context.rel_line_to(2 * ANCHOR_RADIUS, 0)
+        context.rel_move_to(-ANCHOR_RADIUS, -ANCHOR_RADIUS)
+        context.rel_line_to(0, 2 * ANCHOR_RADIUS)
+        context.stroke()
+        return 2 * center - a
+
     def draw_diamond(self, context, a, b, fill):
         phi = cmath.phase(b - a)
-        rels = [cmath.rect(DIAMOND_SIZE, phi + DIAMOND_ANGLE), cmath.rect(DIAMOND_SIZE, phi - DIAMOND_ANGLE), cmath.rect(-DIAMOND_SIZE, phi + DIAMOND_ANGLE)]
+        rels = [cmath.rect(DIAMOND_SIZE, phi + DIAMOND_ANGLE),
+                cmath.rect(DIAMOND_SIZE, phi - DIAMOND_ANGLE),
+                cmath.rect(-DIAMOND_SIZE, phi + DIAMOND_ANGLE)]
         context.move_to(a.real, a.imag)
         for rel in rels:
             context.rel_line_to(rel.real, rel.imag)
@@ -701,6 +749,17 @@ class EdgeView(View):
         elif (fill == 2):
             context.fill()
         return a + rels[0] + rels[1]
+
+    def draw_triangle(self, context, a, b):
+        phi = cmath.phase(b - a)
+        points = [a + cmath.rect(TRIANGLE_SIZE, phi + TRIANGLE_ANGLE),
+                  a + cmath.rect(TRIANGLE_SIZE, phi - TRIANGLE_ANGLE)]
+        context.move_to(a.real, a.imag)
+        for point in points:
+            context.line_to(point.real, point.imag)
+        context.close_path()
+        context.stroke()
+        return (points[0] + points[1]) / 2
 
     def draw_arrow(self, context, a, b):
         phi = cmath.phase(b - a)
@@ -733,24 +792,39 @@ class EdgeView(View):
     def draw(self, context):
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
+        context.set_dash([], 0)
 
         if not self.diamond:
             path = self.paths[0][:]
+
+            if self.edge.ends[0].kind == EdgeEnd.Kind.NESTING:
+                path[0] = self.draw_anchor(context, path[0], path[1])
+            if self.edge.ends[1].kind == EdgeEnd.Kind.NESTING:
+                path[-1] = self.draw_anchor(context, path[-1], path[-2])
 
             if self.edge.ends[0].aggregation:
                 path[0] = self.draw_diamond(context, path[0], path[1], self.edge.ends[0].aggregation)
             if self.edge.ends[1].aggregation:
                 path[-1] = self.draw_diamond(context, path[-1], path[-2], self.edge.ends[1].aggregation)
 
-            if self.edge.ends[0].navigable:
+            if self.edge.ends[0].kind in (EdgeEnd.Kind.GENERALIZATION, EdgeEnd.Kind.REALIZATION):
+                path[0] = self.draw_triangle(context, path[0], path[1])
+            if self.edge.ends[1].kind in (EdgeEnd.Kind.GENERALIZATION, EdgeEnd.Kind.REALIZATION):
+                path[-1]= self.draw_triangle(context, path[-1], path[-2])
+
+            if self.edge.ends[0].navigable or self.edge.ends[0].kind == EdgeEnd.Kind.DEPENDENCY:
                 self.draw_arrow(context, path[0], path[1])
-            if self.edge.ends[1].navigable:
+            if self.edge.ends[1].navigable or self.edge.ends[1].kind == EdgeEnd.Kind.DEPENDENCY:
                 self.draw_arrow(context, path[-1], path[-2])
+
+            if {end.kind for end in self.edge.ends} & {EdgeEnd.Kind.REALIZATION, EdgeEnd.Kind.DEPENDENCY, EdgeEnd.Kind.ASSOCIATION_CLASS}:
+                context.set_dash([DASH_SIZE], 0)
 
             context.move_to(path[0].real, path[0].imag)
             for z in path[1:]:
                 context.line_to(z.real, z.imag)
             context.stroke()
+            context.set_dash([], 0)
 
             if self.edge.ends[0].caption:
                 self.draw_caption(context, path[0], path[1], self.edge.ends[0].caption or '')
@@ -760,20 +834,43 @@ class EdgeView(View):
             for p, end in zip(self.paths, self.edge.ends):
                 path = p[:]
 
+                if end.kind == EdgeEnd.Kind.NESTING:
+                    path[-1] = self.draw_anchor(context, path[-1], path[-2])
                 if end.aggregation:
                     path[-1] = self.draw_diamond(context, path[-1], path[-2], end.aggregation)
-                if end.navigable:
+                if end.kind in (EdgeEnd.Kind.GENERALIZATION, EdgeEnd.Kind.REALIZATION):
+                    path[-1] = self.draw_triangle(context, path[-1], path[-2])
+                if end.navigable or end.kind == EdgeEnd.Kind.DEPENDENCY:
                     self.draw_arrow(context, path[-1], path[-2])
+
+                if (end.kind == EdgeEnd.Kind.ASSOCIATION_CLASS
+                    or {end.kind for end in self.edge.ends} & {EdgeEnd.Kind.REALIZATION, EdgeEnd.Kind.DEPENDENCY}):
+                    context.set_dash([DASH_SIZE], 0)
+                else:
+                    context.set_dash([], 0)
+
                 context.move_to(path[0].real, path[0].imag)
                 for z in path[1:]:
                     context.line_to(z.real, z.imag)
                 context.stroke()
+                context.set_dash([], 0)
+
+                self.draw_caption(context, path[-1], path[-2], end.caption or '')
             self.draw_nary_diamond(context)
 
     def node_resizing(self, node_view, new_width, new_height):
-        end = 0 if node_view.node is self.edge.from_node else -1
-        self.path[end] = complex(node_view.x + new_width * (self.path[end].real - node_view.x) / node_view.w,
-                                 node_view.y + new_height * (self.path[end].imag - node_view.y) / node_view.h)
+        if self.diamond:
+            for path, end in zip(self.paths, self.edge.ends):
+                if end.node is node_view.node:
+                    path[-1] = complex(node_view.x + new_width * (path[-1].real - node_view.x) / node_view.w,
+                                       node_view.y + new_height * (path[-1].imag - node_view.y) / node_view.h)
+        else:
+            if self.edge.ends[0].node is node_view.node:
+                self.paths[0][0] = complex(node_view.x + new_width * (self.paths[0][0].real - node_view.x) / node_view.w,
+                                           node_view.y + new_height * (self.paths[0][0].imag - node_view.y) / node_view.h)
+            if self.edge.ends[1].node is node_view.node:
+                self.paths[0][-1] = complex(node_view.x + new_width * (self.paths[0][-1].real - node_view.x) / node_view.w,
+                                           node_view.y + new_height * (self.paths[0][-1].imag - node_view.y) / node_view.h)
         self.changed(self)
 
 
@@ -914,6 +1011,11 @@ class MainWindow(Gtk.Window):
         self.aggregate_action = builder.get_object('edge_end_aggregate_action')
         self.composite_action = builder.get_object('edge_end_composite_action')
         self.navigability_action = builder.get_object('edge_end_navigable_action')
+        self.generalization_action = builder.get_object('edge_end_generalization_action')
+        self.realization_action = builder.get_object('edge_end_realization_action')
+        self.dependency_action = builder.get_object('edge_end_dependency_action')
+        self.scope_action = builder.get_object('edge_end_scope_action')
+        self.association_class_action = builder.get_object('edge_path_association_class_action')
         self.edge_path_delete_action = builder.get_object('edge_path_delete_action')
         self.node_popup = builder.get_object('compartment_popup')
         self.edge_popup = builder.get_object('edge_popup')
@@ -963,6 +1065,32 @@ class MainWindow(Gtk.Window):
     def navigability_toggled_command(self, action, data=None):
         if not self.context: return
         self.context[0].set_navigability(self.context[1].end_index, action.get_active())
+        self.context = None
+
+    def generalization_toggled_command(self, action, data=None):
+        print 'Hello'
+        if not self.context: return
+        self.context[0].set_kind(self.context[1].end_index, EdgeEnd.Kind.GENERALIZATION if action.get_active() else EdgeEnd.Kind.ASSOCIATION)
+        self.context = None
+
+    def realization_toggled_command(self, action, data=None):
+        if not self.context: return
+        self.context[0].set_kind(self.context[1].end_index, EdgeEnd.Kind.REALIZATION if action.get_active() else EdgeEnd.Kind.ASSOCIATION)
+        self.context = None
+
+    def dependency_toggled_command(self, action, data=None):
+        if not self.context: return
+        self.context[0].set_kind(self.context[1].end_index, EdgeEnd.Kind.DEPENDENCY if action.get_active() else EdgeEnd.Kind.ASSOCIATION)
+        self.context = None
+
+    def scope_toggled_command(self, action, data=None):
+        if not self.context: return
+        self.context[0].set_kind(self.context[1].end_index, EdgeEnd.Kind.NESTING if action.get_active() else EdgeEnd.Kind.ASSOCIATION)
+        self.context = None
+
+    def association_class_toggled_command(self, action, data=None):
+        if not self.context: return
+        self.context[0].set_kind(self.context[1].end_index, EdgeEnd.Kind.ASSOCIATION_CLASS if action.get_active() else EdgeEnd.Kind.ASSOCIATION)
         self.context = None
 
     def redraw(self, what):
