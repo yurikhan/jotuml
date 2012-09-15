@@ -190,16 +190,14 @@ class NodeView(View):
                 if isinstance(edge_view, EdgeView) and edge_view.grab_node(self, event):
                     views.append(edge_view)
             window.grab(views)
-        elif (event.x < self.x or event.x >= self.x + self.w
-              or event.y < self.y or event.y >= self.y + self.h): # on edge: start a new edge
+        elif event.button == 1: # left button: start an edge or edit node
             print 'Create edge'
             drag_point = complex(event.x, event.y)
             start_point = self.clamp(drag_point)
             edge_view = self.diagram().new_edge_view([self.node, None], [start_point, drag_point])
+            edge_view.grace_node_view = self
             window.grab([edge_view])
             edge_view.grab(EdgeView.DragCase.BINARY_END, [(0, 1)], event)
-        else:
-            self.edit(window, event)
 
     def edit(self, window, event):
         print 'Edit node'
@@ -608,7 +606,13 @@ class EdgeView(View):
             attach_to = (self.diagram().attachable_at(event.x, event.y, self)
                          if self.drag_case != EdgeView.DragCase.NARY_END
                          else self.diagram().node_view_at(event.x, event.y))
+            if attach_to is self.grace_node_view:
+                self.delete()
+                window.ungrab()
+                self.grace_node_view.edit(window, event)
+                return
             if isinstance(attach_to, NodeView): # at a node: (re)attach to it
+                self.grace_node_view = None
                 self.edge.ends[end_index].node = attach_to.node
                 self.paths[path_index][vertex_index] = snap_point(attach_to.clamp(point))
                 self.changed(self)
@@ -624,13 +628,18 @@ class EdgeView(View):
                 print 'Delete old edge'
                 self.delete()
                 window.ungrab()
-            elif len(self.paths[path_index]) > 2 and distance(self.paths[path_index][next_vertex], self.paths[path_index][vertex_after], point) < EPSILON:
+            elif (len(self.paths[path_index]) > 2
+                  and distance(self.paths[path_index][next_vertex],
+                               self.paths[path_index][vertex_after], point) < EPSILON):
                 print 'Delete segment'
                 self.paths[path_index].pop(next_vertex)
+                if vertex_index != 0:
+                    self.grabbed[0] = (path_index, vertex_index - 1)
                 self.changed(self)
             else:
                 # nowhere: add segment at end
                 print 'Add segment'
+                self.grace_node_view = None
                 self.paths[path_index][vertex_index] = snap_point(point)
                 if vertex_index == 0:
                     self.paths[path_index] = points + self.paths[path_index]
@@ -790,6 +799,9 @@ class EdgeView(View):
         context.identity_matrix()
 
     def draw(self, context):
+        if (self.grace_node_view
+            and self.grace_node_view.wants(self.paths[0][1].real, self.paths[0][1].imag)):
+            return
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
         context.set_dash([], 0)
