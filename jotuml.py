@@ -136,17 +136,94 @@ class CompartmentView:
 
 
 class NodeView(View):
-    def __init__(self, diagram, node, cx, cy, w, h):
+    def __init__(self, diagram, node, cx, cy):
         View.__init__(self)
         self.diagram = weakref.ref(diagram)
         self.node = node
         self.cx = snap_coord(cx)
         self.cy = snap_coord(cy)
+        self.is_new = True
+        self.changed = DoNothing
+
+    def clamp(self, point):
+        "Return the point of this view's border closest to given point"
+        pass
+
+    def wants(self, x, y):
+        "Return true if (x, y) is within EPSILON from this view"
+        pass
+
+    def distance(self, x, y):
+        "Return the distance from (x, y) to the closest point of this view"
+        pass
+
+    def press(self, window, event):
+        if event.button == 3: # right button: pop up contex menu
+            print 'Node popup menu'
+            window.context = self
+            window.node_popup.popup(None, None, None, None, 3, event.time)
+        elif event.button == 2: # middle button: initiate node move (with all incident edges)
+            print 'Move node'
+            self.drag_point = complex(event.x - self.cx, event.y - self.cy)
+            views = [self]
+            for edge_view in self.diagram().views:
+                if isinstance(edge_view, EdgeView) and edge_view.grab_node(self, event):
+                    views.append(edge_view)
+            window.grab(views)
+        elif event.button == 1: # left button: start an edge or edit node
+            print 'Create edge'
+            drag_point = complex(event.x, event.y)
+            start_point = self.clamp(drag_point)
+            edge_view = self.diagram().new_edge_view([self.node, None], [start_point, drag_point])
+            edge_view.grace_node_view = self
+            window.grab([edge_view])
+            edge_view.grab(EdgeView.DragCase.BINARY_END, [(0, 1)], event)
+
+    def edit(self, window, event):
+        "Start editing"
+        pass
+
+    def edited_text(self, window, text):
+        "Called after the user finishes editing. Parse the text and modify the model. If needed, reroute edges"
+        pass
+
+    def edited(self, window, text, context=None):
+        if not text and self.is_new:
+            print 'Cancel node'
+            self.diagram().model().delete_node(self.node)
+        else:
+            self.edited_text(window, text)
+            self.changed(self)
+
+    def delete(self):
+        print 'Delete node'
+        self.diagram().model().delete_node(self.node)
+
+    def motion(self, window, event):
+        self.cx = event.x - self.drag_point.real
+        self.cy = event.y - self.drag_point.imag
+        self.changed(self)
+
+    def release(self, window, event):
+        print 'Moved node'
+        self.cx = snap_coord(event.x - self.drag_point.real)
+        self.cy = snap_coord(event.y - self.drag_point.imag)
+        self.changed(self)
+        window.ungrab()
+        self.drag_start = None
+        self.drag_start_event = None
+
+    def draw(self, context):
+        "Draw this view"
+        pass
+
+
+class ClassifierNodeView(NodeView):
+    def __init__(self, diagram, node, cx, cy, w, h):
+        NodeView.__init__(self, diagram, node, cx, cy)
         self.w = int(w)
         self.h = int(h)
         self.compartments = [CompartmentView(self, c) for c in node.compartments]
-        self.is_new = True
-        self.changed = DoNothing
 
     def corners(self):
         top, bottom, left, right = [self.cy - self.h / 2, self.cy + self.h / 2, self.cx - self.w / 2, self.cx + self.w / 2]
@@ -169,32 +246,9 @@ class NodeView(View):
 
     def distance(self, x, y):
         p = complex(x, y)
-        corners = self.corners()
         return (0 if self.within(0, x, y)
                 else min(distance(a, b, p)
                          for a, b in self.sides()))
-
-    def press(self, window, event):
-        if event.button == 3: # right button: pop up contex menu
-            print 'Compartment popup menu'
-            window.context = self.compartment_at(event.x, event.y)
-            window.node_popup.popup(None, None, None, None, 3, event.time)
-        elif event.button == 2: # middle button: initiate node move (with all incident edges)
-            print 'Move node'
-            self.drag_point = complex(event.x - self.cx, event.y - self.cy)
-            views = [self]
-            for edge_view in self.diagram().views:
-                if isinstance(edge_view, EdgeView) and edge_view.grab_node(self, event):
-                    views.append(edge_view)
-            window.grab(views)
-        elif event.button == 1: # left button: start an edge or edit node
-            print 'Create edge'
-            drag_point = complex(event.x, event.y)
-            start_point = self.clamp(drag_point)
-            edge_view = self.diagram().new_edge_view([self.node, None], [start_point, drag_point])
-            edge_view.grace_node_view = self
-            window.grab([edge_view])
-            edge_view.grab(EdgeView.DragCase.BINARY_END, [(0, 1)], event)
 
     def edit(self, window, event):
         print 'Edit node'
@@ -206,56 +260,21 @@ class NodeView(View):
             it = window.entry.get_iter_at_location(bx, by)
             window.entry.get_buffer().place_cursor(it)
 
-    def edited(self, window, text, context=None):
-        if not text and self.is_new:
-            print 'Cancel node'
-            self.diagram().model().delete_node(self.node)
-        else:
-            print 'Edited node'
-            ts = text.split(COMPARTMENT_SEPARATOR)
+    def edited_text(self, window, text):
+        print 'Edited node'
+        ts = text.split(COMPARTMENT_SEPARATOR)
 
-            for c, t in zip(self.compartments, ts):
-                c.compartment.text = t
-            if len(ts) < len(self.compartments):
-                del self.compartments[len(ts):]
-            elif len(ts) > len(self.compartments):
-                for t in ts[len(self.compartments):]:
-                    compartment = self.node.new_compartment_after(self.node.compartments[-1], t)
-                    self.compartments.append(CompartmentView(self, compartment))
+        for c, t in zip(self.compartments, ts):
+            c.compartment.text = t
+        if len(ts) < len(self.compartments):
+            del self.compartments[len(ts):]
+        elif len(ts) > len(self.compartments):
+            for t in ts[len(self.compartments):]:
+                compartment = self.node.new_compartment_after(self.node.compartments[-1], t)
+                self.compartments.append(CompartmentView(self, compartment))
 
-            self.is_new = False
-            self.resize(window)
-            self.changed(self)
-
-    def compartment_at(self, x, y):
-        if not (self.cx - self.w / 2 <= x < self.cx + self.w / 2):
-            return None
-        for c in self.compartments:
-            if self.cy - self.h / 2 + c.y <= y < self.cy - self.h / 2 + c.y + c.h:
-                return c
-        return self.compartments[-1]
-
-    def delete(self):
-        print 'Delete node'
-        self.diagram().model().delete_node(self.node)
-
-    def motion(self, window, event):
-        self.cx = event.x - self.drag_point.real
-        self.cy = event.y - self.drag_point.imag
-        self.changed(self)
-
-    def release(self, window, event):
-        print 'Moved node'
-        self.cx = snap_coord(event.x - self.drag_point.real)
-        self.cy = snap_coord(event.y - self.drag_point.imag)
-        self.changed(self)
-        window.ungrab()
-        self.drag_start = None
-        self.drag_start_event = None
-
-    def scale(self, point, new_width, new_height):
-        return complex(self.cx + new_width * (point.real - self.cx) / self.w,
-                       self.cy + new_height * (point.imag - self.cy) / self.h)
+        self.is_new = False
+        self.resize(window)
 
     def resize(self, window):
         layout = Pango.Layout(window.get_pango_context())
@@ -930,7 +949,7 @@ class Diagram:
 
     def new_node_view(self, x, y, w=50, h=22):
         node = self.model().new_node()
-        view = NodeView(self, node, x, y, w, h)
+        view = ClassifierNodeView(self, node, x, y, w, h)
         view.changed = self.changed
         self.views.append(view)
         self.changed(self)
@@ -1047,11 +1066,11 @@ class MainWindow(Gtk.Window):
             self.edit_paste_action.set_sensitive(clipboard.wait_is_text_available())
 
     def edit_node_command(self, data=None):
-        self.context.node_view().edit(self, None)
+        self.context.edit(self, None)
         self.context = None
 
     def delete_node_command(self, data=None):
-        self.context.node_view().delete()
+        self.context.delete()
         self.context = None
 
     def delete_edge_command(self, data=None):
