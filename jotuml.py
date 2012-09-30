@@ -12,6 +12,7 @@ from gi.repository import Gdk
 
 
 EPSILON = 10
+INTERFACE_LOLLIPOP_RADIUS = 10
 NARY_DIAMOND_RADIUS = 10
 ANCHOR_RADIUS = 5
 DIAMOND_SIZE = 10
@@ -22,6 +23,13 @@ ARROW_SIZE = 10
 ARROW_ANGLE = math.pi / 6
 DASH_SIZE = 5
 COMPARTMENT_SEPARATOR = u'\u2029'.encode('utf-8')
+
+
+class TextAlignment:
+    (TOP,
+     BOTTOM,
+     LEFT,
+     RIGHT) = range(4)
 
 
 def projection(a, b, c):
@@ -334,6 +342,28 @@ class ClassifierNodeView(NodeView):
             context.translate(self.cx - self.w / 2 + 2, self.cy - self.h / 2 + c.y + 3)
             PangoCairo.show_layout(context, layout)
             context.identity_matrix()
+
+
+class InterfaceNodeView(NodeView):
+    def __init__(self, diagram, node, cx, cy):
+        NodeView.__init__(self, diagram, node, cx, cy)
+        self.caption_alignment = TextAlignment.BOTTOM
+        self.measure()
+
+    def center(self):
+        return complex(self.cx, self.cy)
+
+    def clamp(self, point):
+        return self.center() + cmath.rect(INTERFACE_LOLLIPOP_RADIUS, cmath.phase(point - self.center()))
+
+    def wants(self, x, y):
+        return (abs(self.center(), complex(x, y)) < INTERFACE_LOLLIPOP_RADIUS + EPSILON
+                or (self.caption_x <= x < self.caption_x + self.caption_w
+                    and self.caption_y <= y < self.caption_y + self.caption_h))
+
+    def distance(self, x, y):
+        center = self.center()
+        return complex(x, y) 
 
 
 class EdgeView(View):
