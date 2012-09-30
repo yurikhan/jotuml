@@ -606,7 +606,7 @@ class EdgeView(View):
             attach_to = (self.diagram().attachable_at(event.x, event.y, self)
                          if self.drag_case != EdgeView.DragCase.NARY_END
                          else self.diagram().node_view_at(event.x, event.y))
-            if attach_to is self.grace_node_view:
+            if attach_to is self.grace_node_view and self.grace_node_view is not None:
                 self.delete()
                 window.ungrab()
                 self.grace_node_view.edit(window, event)
