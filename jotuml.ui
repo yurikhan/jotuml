@@ -134,6 +134,54 @@
         <signal name="toggled" handler="association_class_toggled_command" swapped="no"/>
       </object>
     </child>
+    <child>
+      <object class="GtkRadioAction" id="node_interface_action">
+        <property name="label" translatable="yes">_Interface</property>
+        <property name="draw_as_radio">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_usecase_action">
+        <property name="label" translatable="yes">_Use Case</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_actor_action">
+        <property name="label" translatable="yes">_Actor</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_component_action">
+        <property name="label" translatable="yes">Com_ponent</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_node_action">
+        <property name="label" translatable="yes">_Node</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_class_action">
+        <property name="label" translatable="yes">_Class</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkRadioAction" id="node_package_action">
+        <property name="label" translatable="yes">_Package</property>
+        <property name="draw_as_radio">True</property>
+        <property name="group">node_interface_action</property>
+      </object>
+    </child>
   </object>
   <object class="GtkActionGroup" id="edit_action_group">
     <property name="sensitive">False</property>
@@ -184,6 +232,103 @@
         <property name="can_focus">False</property>
         <property name="use_underline">True</property>
         <property name="use_stock">True</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkMenuItem" id="node_turn_into_item">
+        <property name="use_action_appearance">False</property>
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">_Turn into</property>
+        <property name="use_underline">True</property>
+        <child type="submenu">
+          <object class="GtkMenu" id="menu1">
+            <property name="visible">True</property>
+            <property name="can_focus">False</property>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_class_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_class_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Class</property>
+                <property name="use_underline">True</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_interface_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_interface_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Interface</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_package_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_package_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Package</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_node_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_node_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Node</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_component_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_component_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">C_omponent</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_actor_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_actor_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Actor</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkRadioMenuItem" id="node_usecase_item">
+                <property name="use_action_appearance">False</property>
+                <property name="related_action">node_usecase_action</property>
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="label" translatable="yes">_Use Case</property>
+                <property name="use_underline">True</property>
+                <property name="draw_as_radio">True</property>
+                <property name="group">node_class_item</property>
+              </object>
+            </child>
+          </object>
+        </child>
       </object>
     </child>
     <child>

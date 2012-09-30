@@ -66,8 +66,19 @@ class View:
 
 
 class Node:
+
+    class Kind:
+        (CLASS,
+         INTERFACE,
+         PACKAGE,
+         NODE,
+         COMPONENT,
+         ACTOR,
+         USECASE) = range(7)
+
     def __init__(self):
         self.compartments = [Compartment(self)]
+        self.kind = Node.Kind.CLASS
 
     def new_compartment_after(self, compartment, text):
         new_compartment = Compartment(self, text)
@@ -1049,6 +1060,13 @@ class MainWindow(Gtk.Window):
         self.node_popup = builder.get_object('compartment_popup')
         self.edge_popup = builder.get_object('edge_popup')
         self.edge_end_popup = builder.get_object('edge_end_popup')
+        self.node_class_action = builder.get_object('node_class_action')
+        self.node_interface_action = builder.get_object('node_interface_action')
+        self.node_package_action = builder.get_object('node_package_action')
+        self.node_node_action = builder.get_object('node_node_action')
+        self.node_component_action = builder.get_object('node_component_action')
+        self.node_actor_action = builder.get_object('node_actor_action')
+        self.node_usecase_action = builder.get_object('node_usecase_action')
         builder.connect_signals(self)
 
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
