@@ -136,46 +136,43 @@ class CompartmentView:
 
 
 class NodeView(View):
-    def __init__(self, diagram, node, x, y, w, h):
+    def __init__(self, diagram, node, cx, cy, w, h):
         View.__init__(self)
         self.diagram = weakref.ref(diagram)
         self.node = node
-        self.x = snap_coord(x)
-        self.y = snap_coord(y)
+        self.cx = snap_coord(cx)
+        self.cy = snap_coord(cy)
         self.w = int(w)
         self.h = int(h)
         self.compartments = [CompartmentView(self, c) for c in node.compartments]
         self.is_new = True
         self.changed = DoNothing
 
+    def corners(self):
+        top, bottom, left, right = [self.cy - self.h / 2, self.cy + self.h / 2, self.cx - self.w / 2, self.cx + self.w / 2]
+        return [complex(left, top), complex(left, bottom), complex(right, bottom), complex(right, top), complex(left, top)]
+
+    def sides(self):
+        corners = self.corners()
+        return zip(corners[:-1], corners[1:])
+
     def clamp(self, point):
-        top, bottom, left, right = [self.y, self.y + self.h, self.x, self.x + self.w]
-        vertices = [complex(left, top), complex(left, bottom), complex(right, bottom), complex(right, top), complex(left, top)]
-        projections = [projection(a, b, point) for a, b in zip(vertices[:-1], vertices[1:])]
+        projections = [projection(a, b, point) for a, b in self.sides()]
         return snap_point(min(projections, key=lambda(p): abs(p - point)))
 
+    def within(self, epsilon, x, y):
+        return (self.cx - self.w / 2 - epsilon <= x < self.cx + self.w / 2 + epsilon
+                and self.cy - self.h / 2 - epsilon <= y < self.cy + self.h / 2 + epsilon)
+
     def wants(self, x, y):
-        return (self.x - EPSILON <= x < self.x + self.w + EPSILON
-                and self.y - EPSILON <= y < self.y + self.h + EPSILON)
+        return self.within(EPSILON, x, y)
 
     def distance(self, x, y):
         p = complex(x, y)
-        corners = [complex(self.x, self.y),
-                   complex(self.x + self.w, self.y),
-                   complex(self.x + self.w, self.y + self.h),
-                   complex(self.x, self.y + self.h),
-                   complex(self.x, self.y)]
-        return (0 if self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+        corners = self.corners()
+        return (0 if self.within(0, x, y)
                 else min(distance(a, b, p)
-                         for a, b in zip(corners[:-1], corners[1:])))
-
-    def side(self, x, y):
-        corners = [complex(self.x, self.y),
-                   complex(self.x + self.w, self.y),
-                   complex(self.x + self.w, self.y + self.h),
-                   complex(self.x, self.y + self.h),
-                   complex(self.x, self.y)]
-        return min([distance(a, b, p), a, b] for a, b in zip(corners[:-1], corners[1:]))[1:]
+                         for a, b in self.sides()))
 
     def press(self, window, event):
         if event.button == 3: # right button: pop up contex menu
@@ -184,7 +181,7 @@ class NodeView(View):
             window.node_popup.popup(None, None, None, None, 3, event.time)
         elif event.button == 2: # middle button: initiate node move (with all incident edges)
             print 'Move node'
-            self.drag_point = complex(event.x - self.x, event.y - self.y)
+            self.drag_point = complex(event.x - self.cx, event.y - self.cy)
             views = [self]
             for edge_view in self.diagram().views:
                 if isinstance(edge_view, EdgeView) and edge_view.grab_node(self, event):
@@ -202,9 +199,9 @@ class NodeView(View):
     def edit(self, window, event):
         print 'Edit node'
         window.edit(self, COMPARTMENT_SEPARATOR.join(c.compartment.text for c in self.compartments),
-                    self.x + 1, self.y + 1, self.w - 2, self.h - 2)
+                    self.cx - self.w / 2 + 1, self.cy - self.h / 2 + 1, self.w - 2, self.h - 2)
         if event:
-            x, y = event.x - self.x, event.y - self.y
+            x, y = event.x - (self.cx - self.w / 2), event.y - (self.cy - self.h / 2)
             bx, by = window.entry.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
             it = window.entry.get_iter_at_location(bx, by)
             window.entry.get_buffer().place_cursor(it)
@@ -231,10 +228,10 @@ class NodeView(View):
             self.changed(self)
 
     def compartment_at(self, x, y):
-        if not (self.x <= x < self.x + self.w):
+        if not (self.cx - self.w / 2 <= x < self.cx + self.w / 2):
             return None
         for c in self.compartments:
-            if self.y + c.y <= y < self.y + c.y + c.h:
+            if self.cy - self.h / 2 + c.y <= y < self.cy - self.h / 2 + c.y + c.h:
                 return c
         return self.compartments[-1]
 
@@ -243,18 +240,22 @@ class NodeView(View):
         self.diagram().model().delete_node(self.node)
 
     def motion(self, window, event):
-        self.x = event.x - self.drag_point.real
-        self.y = event.y - self.drag_point.imag
+        self.cx = event.x - self.drag_point.real
+        self.cy = event.y - self.drag_point.imag
         self.changed(self)
 
     def release(self, window, event):
         print 'Moved node'
-        self.x = snap_coord(event.x - self.drag_point.real)
-        self.y = snap_coord(event.y - self.drag_point.imag)
+        self.cx = snap_coord(event.x - self.drag_point.real)
+        self.cy = snap_coord(event.y - self.drag_point.imag)
         self.changed(self)
         window.ungrab()
         self.drag_start = None
         self.drag_start_event = None
+
+    def scale(self, point, new_width, new_height):
+        return complex(self.cx + new_width * (point.real - self.cx) / self.w,
+                       self.cy + new_height * (point.imag - self.cy) / self.h)
 
     def resize(self, window):
         layout = Pango.Layout(window.get_pango_context())
@@ -283,10 +284,10 @@ class NodeView(View):
     def draw(self, context):
         context.set_source_rgb(0, 0, 0)
         context.set_line_width(1)
-        context.rectangle(self.x, self.y, self.w, self.h)
+        context.rectangle(self.cx - self.w / 2, self.cy - self.h / 2, self.w, self.h)
 
         for c in self.compartments[1:]:
-            context.move_to(self.x, self.y + c.y)
+            context.move_to(self.cx - self.w / 2, self.cy - self.h / 2 + c.y)
             context.rel_line_to(self.w, 0)
 
         context.stroke()
@@ -300,7 +301,7 @@ class NodeView(View):
             layout.set_indent(-16384)
             layout.set_text(c.compartment.text, -1)
             PangoCairo.update_layout(context, layout)
-            context.translate(self.x + 2, self.y + c.y + 3)
+            context.translate(self.cx - self.w / 2 + 2, self.cy - self.h / 2 + c.y + 3)
             PangoCairo.show_layout(context, layout)
             context.identity_matrix()
 
@@ -874,15 +875,12 @@ class EdgeView(View):
         if self.diamond:
             for path, end in zip(self.paths, self.edge.ends):
                 if end.node is node_view.node:
-                    path[-1] = complex(node_view.x + new_width * (path[-1].real - node_view.x) / node_view.w,
-                                       node_view.y + new_height * (path[-1].imag - node_view.y) / node_view.h)
+                    path[-1] = node_view.scale(path[-1], new_width, new_height)
         else:
             if self.edge.ends[0].node is node_view.node:
-                self.paths[0][0] = complex(node_view.x + new_width * (self.paths[0][0].real - node_view.x) / node_view.w,
-                                           node_view.y + new_height * (self.paths[0][0].imag - node_view.y) / node_view.h)
+                self.paths[0][0] = node_view.scale(self.paths[0][0], new_width, new_height)
             if self.edge.ends[1].node is node_view.node:
-                self.paths[0][-1] = complex(node_view.x + new_width * (self.paths[0][-1].real - node_view.x) / node_view.w,
-                                           node_view.y + new_height * (self.paths[0][-1].imag - node_view.y) / node_view.h)
+                self.paths[0][-1] = node_view.scale(self.paths[0][-1], new_width, new_height)
         self.changed(self)
 
 
