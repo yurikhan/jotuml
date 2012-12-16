@@ -10,10 +10,10 @@ import Graphics.UI.Gtk.Builder
 import Graphics.UI.Gtk.Windows.MessageDialog
 
 -- workaround
-modifyIORef'' :: IORef a -> (a -> a) -> IO ()
+modifyIORef'' :: IORef a -> (a -> IO a) -> IO ()
 modifyIORef'' ref f = do
     x <- readIORef ref
-    let x' = f x
+    x' <- f x
     x' `seq` writeIORef ref x'
 
 
@@ -50,10 +50,10 @@ newVertex = Vertex Class [Compartment "Hello"]
 
 data Compartment = Compartment { compartmentText :: String }
 
-measureCompartment :: PangoLayout -> (Double, Double, [Double]) -> Compartment -> Render (Double, Double, [Double])
+measureCompartment :: PangoLayout -> (Double, Double, [Double]) -> Compartment -> IO (Double, Double, [Double])
 measureCompartment layout (oldWidth, oldHeight, oldRules) compartment = do
-    liftIO $ layoutSetText layout $ compartmentText compartment
-    (Rectangle inkx _ inkw _, Rectangle _ _ _ logh) <- liftIO $ layoutGetPixelExtents layout
+    layoutSetText layout $ compartmentText compartment
+    (Rectangle inkx _ inkw _, Rectangle _ _ _ logh) <- layoutGetPixelExtents layout
     let width = 4 + (abs inkx) + inkw
         height = 6 + logh
         newHeight = oldHeight + fromIntegral height
@@ -75,20 +75,48 @@ newDiagram = Diagram []
 renderDiagram :: Diagram -> Render ()
 renderDiagram diagram = mapM_ renderView $ diagramViews diagram
 
+viewsAt :: (Double, Double) -> Diagram -> [View]
+viewsAt (x, y) diagram = filter ((x, y) `inside`) $ diagramViews diagram
+
+
 data View = VertexView { viewVertex :: Vertex,
                          viewCx :: Double,
                          viewCy :: Double,
+                         viewWidth :: Double,
+                         viewHeight :: Double,
+                         viewRules :: [Double],
                          viewIsNew :: Bool }
 
+newVertexView :: Vertex -> (Double, Double) -> IO View
+newVertexView v (cx, cy) = sizeView $ VertexView {viewVertex=v,
+                                                  viewCx=cx,
+                                                  viewCy=cy,
+                                                  viewWidth=undefined,
+                                                  viewHeight=undefined,
+                                                  viewRules=undefined,
+                                                  viewIsNew=True}
+
+inside :: (Double, Double) -> View -> Bool
+(x, y) `inside` VertexView {viewCx=cx, viewCy=cy, viewWidth=w, viewHeight=h} = x - cx <= w / 2 && y - cy <= h / 2
+
+makeLayout :: IO PangoLayout
+makeLayout = do
+    context <- cairoCreateContext Nothing
+    fontDescriptionFromString "sans 10" >>= contextSetFontDescription context
+    layout <- layoutEmpty context
+    layoutSetIndent layout (-16384)
+    return layout
+
+sizeView :: View -> IO View
+sizeView vv@VertexView {viewVertex=v} = do
+    layout <- makeLayout
+    (width, height, rules) <- foldM (measureCompartment layout) (0, 0, []) $ vertexCompartments v
+    return (vv {viewWidth=width, viewHeight=height, viewRules=rules})
+
 renderView :: View -> Render ()
-renderView (VertexView v cx cy _) = do
+renderView VertexView {viewVertex=v, viewCx=cx, viewCy=cy, viewWidth=width, viewHeight=height, viewRules=rules} = do
     setSourceRGB 0 0 0
     setAntialias AntialiasSubpixel
-    context <- liftIO $ cairoCreateContext Nothing
-    liftIO $ fontDescriptionFromString "sans 10" >>= contextSetFontDescription context
-    layout <- liftIO $ layoutEmpty context
-    liftIO $ layoutSetIndent layout (-16384)
-    (width, height, rules) <- foldM (measureCompartment layout) (0, 0, []) $ vertexCompartments v
     let left = cx - width / 2
         top = cy - height / 2
         right = cx + width / 2
@@ -96,24 +124,26 @@ renderView (VertexView v cx cy _) = do
     rectangle left top width height
     mapM (drawRule left right) (init rules)
     stroke
+    layout <- liftIO makeLayout
     mapM (renderCompartment layout left top) (zip (0:reverse rules) $ vertexCompartments v)
     return ()
     where drawRule leftx rightx y = do
               moveTo leftx y
               lineTo rightx y
 
-addNewClassView :: Double -> Double -> Model -> Model
-addNewClassView x y oldModel = Model (newVertex:oldVertices) newDiagram where
-    oldVertices = modelVertices oldModel
-    newDiagram = Diagram $ newView:oldViews
-    newView = VertexView newVertex x y True
-    oldViews = diagramViews $ modelDiagram oldModel
-
+addNewClassView :: (Double, Double) -> Model -> IO Model
+addNewClassView (x, y) oldModel = do
+    let oldVertices = modelVertices oldModel
+        oldViews = diagramViews $ modelDiagram oldModel
+    newView <- newVertexView newVertex (x, y)
+    let newDiagram = Diagram $ newView:oldViews
+    return $ Model (newVertex:oldVertices) newDiagram
 
 layoutButtonPressed :: UI -> ModelRef -> EventM EButton Bool
 layoutButtonPressed ui modelRef = tryEvent $ do
+    model <- liftIO $ readIORef modelRef
     (x, y) <- eventCoordinates
-    liftIO $ modifyIORef'' modelRef $ addNewClassView x y
+    liftIO $ modifyIORef'' modelRef $ addNewClassView (x, y)
     liftIO $ widgetQueueDraw $ layout ui
     return ()
 
