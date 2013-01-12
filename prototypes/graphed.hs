@@ -139,6 +139,10 @@ makeGeometry ((x0, y0), r0) ((x1, y1), r1) = [(x0', y0'), (x1', y1')]
           (x0', y0') = lerp (x0, y0) (x1, y1) (r0/len)
           (x1', y1') = lerp (x1, y1) (x0, y0) (r1/len)
 
+snapGeometry xy0 xy1 = snapHead xy0 . liftG Reverse (snapHead xy1)
+    where snapHead xy0 (_:xys@(xy:_)) = lerp xy0 xy (nodeRadius / magnitude (xy ^-^ xy0)) : xys
+
+
 initialModel :: Model
 initialModel = let ns = [(i, NodeView (x, y) "") | i <- [0..4],
                          let x = 300 + 200 * sin(2*pi/5 * fromIntegral i)
@@ -159,17 +163,17 @@ moveNode (n, _) xy' = liftModel
                       . mapNodes fixNode
     where fixEdge (u, uv, v, vv, ev) =
               if u == n || v == n
-              then ev{geometry=makeGeometry (xy uv, nodeRadius) (xy vv, nodeRadius)}
+              then ev{geometry=snapGeometry (xy uv) (xy vv) $ geometry ev}
               else ev
           fixNode (m, mv) = if m == n then mv{xy=xy'} else mv
 
 deleteNode :: Node -> ModelTransition
 deleteNode (n, _) = liftModel $ delNode n
 
-addEdge :: Direction -> Node -> Node -> ModelTransition
-addEdge Reverse v u = addEdge Forward u v
-addEdge Forward (u, uv) (v, vv) =
-    liftModel $ insEdge (u, v, EdgeView (makeGeometry (xy uv, 10) (xy vv, 10)) "" "" "")
+addEdge :: Direction -> Node -> Node -> LineString -> ModelTransition
+addEdge Reverse v u g = addEdge Forward u v $ reverse g
+addEdge Forward (u, uv) (v, vv) g =
+    liftModel $ insEdge (u, v, EdgeView (snapGeometry (xy uv) (xy vv) g) "" "" "")
 
 deleteEdge :: Edge -> ModelTransition
 deleteEdge (u, v, _) = liftModel $ delEdge (u, v)
@@ -184,6 +188,9 @@ data View = View {
     edgePopupMenu :: Gtk.Menu,
     layout :: Gtk.Layout,
     statusBar :: Gtk.Statusbar,
+    layoutButtonPressHandler :: IORef (Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
+           -> (Double, Double) -> HitTest
+           -> ModelAndViewUpdate (IO ())),
     layoutMotionNotifyHandler :: IORef (Point -> ViewAction),
     layoutButtonReleaseHandler :: IORef (Point -> ModelAndViewUpdate (IO ())),
     context :: IORef Context,
@@ -221,6 +228,9 @@ data ElasticElement = ElasticNode Node
 data Direction = Forward
                | Reverse
                deriving (Show)
+liftG :: Direction -> (LineString -> LineString) -> LineString -> LineString
+liftG Forward f = f
+liftG Reverse f = reverse . f . reverse
 
 type ViewAction = Model -> View -> IO ()
 
@@ -246,47 +256,47 @@ moveElasticNode xy' _ view = do
 endElasticNode :: Point -> ModelAndViewUpdate (IO ())
 endElasticNode xy' modelRef view = do
     ec <- readIORef $ elasticContext view
-    (endElasticNode' ec <@> clearElasticContext) modelRef view
+    (endElasticNode' ec <@> clearElasticContext >&> clearDragHandlers) modelRef view
     where
         endElasticNode' Nothing = id
         endElasticNode' (Just (ElasticContext model' (ElasticNode u))) = moveNode u xy'
 
-startElasticEdge :: Direction -> Node -> Maybe Node -> Point -> ViewAction
-startElasticEdge dir u@(_, NodeView xy _) v xy' model view = do
-    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticEdge dir u v geom'
-    where geom' = makeGeometry (xy, 10) (xy', 0)
-          m' = liftModel (mapEdges (setGeometry geom' dir u v)) $ model
-          setGeometry geom' Forward (u', _) (Just (v', _)) (u, _, v, _, ev)
-              | u == u' && v == v' = ev{geometry=geom'}
-          setGeometry geom' Reverse (v', _) (Just (u', _)) (u, _, v, _, ev)
-              | u == u' && v == v' = ev{geometry=reverse geom'}
-          setGeometry _ _ _ _ (_, _, _, _, ev) = ev
+startElasticEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point -> ViewAction
+startElasticEdge dir u@(_, NodeView xy _) e v xy' model view = do
+    writeIORef' (elasticContext view) $
+        Just $ ElasticContext (model' e model) $ ElasticEdge dir u v $ geom' e
+    where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
+          geom' (Just (_, _, EdgeView geom _ _ _)) = liftG dir ((++ [xy']) . init) geom
+          model' Nothing = id
+          model' (Just (uu, vv, _)) = liftModel $ delEdge (uu, vv)
+
+modifyElasticEdgeGeometry :: (LineString -> LineString) -> ViewAction
+modifyElasticEdgeGeometry f _ view = do
+    ec <- readIORef $ elasticContext view
+    modify' ec
+    where modify' Nothing = return ()
+          modify' (Just (ElasticContext model' (ElasticEdge dir u v geom))) =
+              writeIORef' (elasticContext view) $
+                  Just $ ElasticContext model' $ ElasticEdge dir u v $ liftG dir f $ geom
 
 moveElasticEdge :: Point -> ViewAction
-moveElasticEdge xy' model view = do
-    ec <- readIORef $ elasticContext view
-    case ec of
-        Nothing -> return ()
-        Just (ElasticContext model' (ElasticEdge dir u v _)) ->
-            startElasticEdge dir u v xy' model' view
+moveElasticEdge xy' = modifyElasticEdgeGeometry ((++ [xy']) . init)
 
-endElasticEdge :: Point -> ModelAndViewUpdate (IO ())
-endElasticEdge xy' modelRef view = do
+releaseElasticEdge :: Point -> ModelAndViewUpdate (IO ())
+releaseElasticEdge xy' modelRef view = do
     ec <- readIORef $ elasticContext view
     model <- readIORef modelRef
-    (endElasticEdge' ec (hitTest xy' $ graph model) <@> clearElasticContext) modelRef view
+    (release' ec (hitTest xy' $ graph model)) modelRef view
     where
-        endElasticEdge' :: Maybe ElasticContext -> HitTest -> ModelTransition
-        endElasticEdge' (Just (ElasticContext m'
-                               (ElasticEdge dir u Nothing _)))
-                        (OnNode v') =
-            addEdge dir u v'
-        endElasticEdge' (Just (ElasticContext m'
-                               (ElasticEdge dir u@(uId, _) (Just v@(vId, _)) _)))
-                        (OnNode v') =
-            addEdge dir u v' . deleteEdge dir u v
-        endElasticEdge' _ _ = id
+        release' :: Maybe ElasticContext -> HitTest -> ModelAndViewUpdate (IO ())
+        release' (Just (ElasticContext _ (ElasticEdge dir u Nothing g))) (OnNode v') =
+            addEdge dir u v' g <@> clearElasticContext >&> clearDragHandlers
+        release' (Just (ElasticContext _ (ElasticEdge dir u (Just v) g))) (OnNode v') =
+            addEdge dir u v' g . deleteEdge dir u v
+            <@> clearElasticContext >&> clearDragHandlers
+        release' (Just (ElasticContext _ (ElasticEdge dir u _ _))) _ =
+            id <@> modifyElasticEdgeGeometry (++ [xy'])
+        release' _ _ = id <@> clearElasticContext >&> clearDragHandlers
 
         deleteEdge Forward (u, _) (v, _) = liftModel $ delEdge (u, v)
         deleteEdge Reverse (v, _) (u, _) = liftModel $ delEdge (u, v)
@@ -331,6 +341,7 @@ createView = do
 
     statusBar <- builderGetObject builder castToStatusbar "status_bar"
 
+    layoutButtonPressHandler <- newIORef pressed
     layoutMotionNotifyHandler <- newIORef $ const idView
     layoutButtonReleaseHandler <- newIORef $ const $ id <@> idView
 
@@ -343,8 +354,8 @@ createView = do
                 editCutItem editCopyItem editPasteItem editDeleteItem helpAboutItem
                 nodeDeleteItem edgeDeleteItem)
                nodePopupMenu edgePopupMenu layout statusBar
-               layoutMotionNotifyHandler layoutButtonReleaseHandler context
-               elasticContext
+               layoutButtonPressHandler layoutMotionNotifyHandler layoutButtonReleaseHandler
+               context elasticContext
 
     return view
 
@@ -375,7 +386,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderEdge (_, _, EdgeView g _ _ _) = renderLineString g
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
-          renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ Nothing g))) =
+          renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ g))) =
               renderLineString g
           renderElasticEdge _ = return ()
 
@@ -419,11 +430,13 @@ setDragHandlers :: (Point -> ViewAction)
                    -> (Point -> ModelAndViewUpdate (IO ()))
                    -> ViewAction
 setDragHandlers dragging released _ view = do
+    writeIORef' (layoutButtonPressHandler view) ignorePressed
     writeIORef' (layoutMotionNotifyHandler view) dragging
     writeIORef' (layoutButtonReleaseHandler view) released
 
 clearDragHandlers :: ViewAction
 clearDragHandlers _ view = do
+    writeIORef' (layoutButtonPressHandler view) pressed
     writeIORef' (layoutMotionNotifyHandler view) $ const idView
     writeIORef' (layoutButtonReleaseHandler view) $ const $ id <@> idView
 
@@ -502,26 +515,28 @@ layoutButtonPressed m v = do
     xy <- eventCoordinates
     liftIO $ do
         model <- readIORef m
-        pressed click button (Just (button, timestamp)) xy (hitTest xy $ graph model) m v
+        handler <- readIORef $ layoutButtonPressHandler v
+        handler click button (Just (button, timestamp)) xy (hitTest xy $ graph model) m v
     return True
-    where
-        pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
-                   -> (Double, Double) -> HitTest
-                   -> ModelAndViewUpdate (IO ())
-        pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
-        pressed SingleClick LeftButton _ xy (OnNode n) = dragEdge Forward n Nothing xy
-        pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
-        pressed SingleClick MiddleButton _ xy (OnEdgeStart (u, _, v)) =
-            dragEdge Reverse v (Just u) xy
-        pressed SingleClick MiddleButton _ xy (OnEdgeEnd (u, _, v)) =
-            dragEdge Forward u (Just v) xy
-        pressed SingleClick RightButton bt _ (OnNode n) = id <@> popupNodeMenu n bt
-        pressed SingleClick RightButton bt _ (OnEdge e) = id <@> popupEdgeMenu e bt
-        pressed SingleClick RightButton bt _ (OnEdgeStart (_, e, _)) =
-            id <@> popupEdgeMenu e bt
-        pressed SingleClick RightButton bt _ (OnEdgeEnd (_, e, _)) =
-            id <@> popupEdgeMenu e bt
-        pressed _ _ _ _ _ = \_ _ -> return ()
+
+pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
+           -> (Double, Double) -> HitTest
+           -> ModelAndViewUpdate (IO ())
+pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
+pressed SingleClick LeftButton _ xy (OnNode n) = dragEdge Forward n Nothing Nothing xy
+pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
+pressed SingleClick MiddleButton _ xy (OnEdgeStart (u, e, v)) =
+    dragEdge Reverse v (Just e) (Just u) xy
+pressed SingleClick MiddleButton _ xy (OnEdgeEnd (u, e, v)) =
+    dragEdge Forward u (Just e) (Just v) xy
+pressed SingleClick RightButton bt _ (OnNode n) = id <@> popupNodeMenu n bt
+pressed SingleClick RightButton bt _ (OnEdge e) = id <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (OnEdgeStart (_, e, _)) =
+    id <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (OnEdgeEnd (_, e, _)) =
+    id <@> popupEdgeMenu e bt
+pressed _ _ _ _ _ = id <@> idView
+ignorePressed _ _ _ _ _ = id <@> idView
 
 layoutMotionNotify :: ModelAndViewUpdate (EventM EMotion Bool)
 layoutMotionNotify m v = do
@@ -536,7 +551,7 @@ layoutButtonReleased m v = do
     xy <- eventCoordinates
     liftIO $ do
         handler <- readIORef $ layoutButtonReleaseHandler v
-        (handler xy >>> id <@> refreshView >&> clearDragHandlers) m v
+        (handler xy >>> id <@> refreshView) m v
     return True
 
 addNewNode :: Point -> ModelAndViewUpdate (IO ())
@@ -553,11 +568,12 @@ dragNode n xy = id
                 >&> refreshView
                 >&> setDragHandlers moveElasticNode endElasticNode
 
-dragEdge :: Direction -> Node -> Maybe Node -> Point -> ModelAndViewUpdate (IO ())
-dragEdge dir fixedNode otherNode xy = id
-                                      <@> startElasticEdge dir fixedNode otherNode xy
-                                      >&> refreshView
-                                      >&> setDragHandlers moveElasticEdge endElasticEdge
+dragEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point -> ModelAndViewUpdate (IO ())
+dragEdge dir fixedNode edge otherNode xy =
+    id
+    <@> startElasticEdge dir fixedNode edge otherNode xy
+    >&> refreshView
+    >&> setDragHandlers moveElasticEdge releaseElasticEdge
 
 deleteActivated :: ModelAndViewUpdate (IO ())
 deleteActivated m v = do
