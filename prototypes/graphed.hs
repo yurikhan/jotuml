@@ -61,6 +61,12 @@ mapEdges f g = mkGraph ns' es'
 node :: G.Graph gr => gr a b -> G.Node -> LNode a
 node g i = (i, v) where Just v = lab g i
 
+labNeighbors :: G.Graph gr => gr a b -> G.Node -> [LNode a]
+labNeighbors g n = map (node g) $ neighbors g n
+
+labNeighborsL :: G.Graph gr => gr a b -> LNode a -> [LNode a]
+labNeighborsL g (n, _) = labNeighbors g n
+
 {- The Model -}
 
 nodeRadius :: Double
@@ -73,6 +79,7 @@ type ModelRef = IORef Model
 data ElementView =
     NodeView Point
     | EdgeView LineString
+    | EdgeEndView Direction
     deriving (Show)
 type Element = LNode ElementView
 
@@ -84,31 +91,60 @@ isEdge :: Element -> Bool
 isEdge (_, EdgeView {}) = True
 isEdge _ = False
 
+isEdgeEnd :: Element -> Bool
+isEdgeEnd (_, EdgeEndView _) = True
+isEdgeEnd _ = False
+
+nodeEnds :: Graph -> Element -> [Element]
+nodeEnds g (n, NodeView {}) = filter isEdgeEnd $ labNeighbors g n
+
+nodeEdges :: Graph -> Element -> [Element]
+nodeEdges g n@(_, NodeView {}) = filter isEdge $ concatMap (labNeighborsL g) $ nodeEnds g n
+
+edgeEnds :: Graph -> Element -> [Element]
+edgeEnds g (e, EdgeView {}) = filter isEdgeEnd $ labNeighbors g e
+
+edgeNodes :: Graph -> Element -> [Element]
+edgeNodes g e@(_, EdgeView {}) = filter isNode $ concatMap (labNeighborsL g) $ edgeEnds g e
+
+endNode :: Graph -> Element -> Element
+endNode g (e, EdgeEndView _) = head $ filter isNode $ labNeighbors g e
+
+endEdge :: Graph -> Element -> Element
+endEdge g (e, EdgeEndView _) = head $ filter isEdge $ labNeighbors g e
+
+endOthers :: Graph -> Element -> [Element]
+endOthers g end@(e, EdgeEndView _) = filter ((/= e) . fst) $ edgeEnds g $ endEdge g end
+
+endOther :: Graph -> Element -> Element
+endOther g end@(_, EdgeEndView _) = head $ endOthers g end
+
+endXY :: Graph -> Element -> Point
+endXY g end@(_, EdgeEndView dir) = geomEnd dir geom
+    where (_, EdgeView geom) = endEdge g end
+          geomEnd Forward = head
+          geomEnd Reverse = last
+
 mapElements :: (Element -> ElementView) -- labeled node -> new label
-               -> ((Element, Element, Element) -> ElementView) -- source, edge, target -> new label
+               -> ((Element, Element, Element) -> ElementView) -- end, node, edge -> new label
+               -> ((Element, [Element], [Element]) -> ElementView) -- edge, [end], [node] -> new label
                -> Graph -> Graph
-mapElements fNode fEdge g = mapNodes f g
-    where f n@(_, NodeView {}) = fNode n
-          f e@(ee, EdgeView {}) = fEdge (node g u, e, node g v)
-              where [u] = pre g ee
-                    [v] = suc g ee
+mapElements fNode fEnd fEdge g = mapNodes f g
+    where f n@(_, NodeView _) = fNode n
+          f end@(_, EdgeEndView _) = fEnd (end, node, edge)
+              where node = endNode g end
+                    edge = endEdge g end
+          f e@(ee, EdgeView _) = fEdge (e, ends, nodes)
+              where ends = edgeEnds g e
+                    nodes = edgeNodes g e
 
 nodeNear :: Point -> Element -> Bool
 nodeNear xy (_, NodeView xy') = magnitude (xy ^-^ xy') < nodeRadius
 
 type Reference = LEdge ()
 
-type EdgeEnds = (Element, Element, Element)
-type EdgeEndType = LineString -> Point -- head or last
-
-edgeEnds :: Graph -> Element -> EdgeEnds
-edgeEnds g e@(ee, _) = (node g . head $ pre g ee, e, node g . head $ suc g ee)
-
-edgesEnds :: Graph -> [EdgeEnds]
-edgesEnds g = map (edgeEnds g) . filter isEdge $ labNodes g
-
-endNear :: EdgeEndType -> Point -> EdgeEnds -> Bool
-endNear t xy (_, (_, EdgeView geom), _) = magnitude (xy ^-^ t geom) < 10
+endNear :: Graph -> Point -> Element -> Bool
+endNear g xy end@(_, EdgeEndView dir) = magnitude (xy ^-^ (endXY g end)) < 10
 
 edgeNear :: Point -> Element -> Bool
 edgeNear xy (_, EdgeView geom) = any (segmentNear xy) (segments geom)
@@ -116,35 +152,19 @@ edgeNear xy (_, EdgeView geom) = any (segmentNear xy) (segments geom)
 segmentNear :: Point -> (Point, Point) -> Bool
 segmentNear xy seg = (segmentDistance xy seg) < 10
 
-data HitTest = OnNode Element
-             | OnEdge Element
-             | OnEdgeStart EdgeEnds
-             | OnEdgeEnd EdgeEnds
-             | Nowhere
-             deriving (Show)
+type HitTest = Maybe Element
 
-distanceTo :: Point -> HitTest -> (Int, Double)
-distanceTo xy (OnNode (_, NodeView xy')) = (0, magnitude (xy ^-^ xy'))
-distanceTo xy (OnEdgeStart (_, (_, EdgeView g), _)) =
-    (1, magnitude (xy ^-^ head g))
-distanceTo xy (OnEdgeEnd   (_, (_, EdgeView g), _)) =
-    (1, magnitude (xy ^-^ last g))
-distanceTo xy (OnEdge (_, EdgeView g)) =
-    (2, minimum $ map (segmentDistance xy) $ segments g)
-distanceTo _ Nowhere = (9, 0)
+distanceTo :: Graph -> Point -> Element -> (Int, Double)
+distanceTo _ xy (_, NodeView xy') = (0, magnitude (xy ^-^ xy'))
+distanceTo g xy end@(_, EdgeEndView _) = (1, magnitude (xy ^-^ endXY g end))
+distanceTo _ xy (_, EdgeView g) = (2, minimum $ map (segmentDistance xy) $ segments g)
 
 hitTest :: Point -> Graph -> HitTest
-hitTest xy g = case sortWith (distanceTo xy) nearThings of
-                   [] -> Nowhere
-                   ht:_ -> ht
+hitTest xy g = listToMaybe $ sortWith (distanceTo g xy) nearThings
     where nearNodes = filter (nodeNear xy) $ filter isNode $ labNodes g
-          nearStarts = filter (endNear head xy) $ edgesEnds g
-          nearEnds = filter (endNear last xy) $ edgesEnds g
+          nearEnds = filter (endNear g xy) $ filter isEdgeEnd $ labNodes g
           nearEdges = filter (edgeNear xy) $ filter isEdge $ labNodes g
-          nearThings = (map OnNode nearNodes) ++
-                       (map OnEdgeStart nearStarts) ++
-                       (map OnEdgeEnd nearEnds) ++
-                       (map OnEdge nearEdges)
+          nearThings = nearNodes ++ nearEnds ++ nearEdges
 
 makeGeometry :: (Point, Double) -> (Point, Double) -> LineString
 makeGeometry ((x0, y0), r0) ((x1, y1), r1) = [(x0', y0'), (x1', y1')]
@@ -163,18 +183,18 @@ initialModel :: Model
 initialModel = let points = [(i, (x, y)) | i <- [0..4],
                              let x = 300 + 200 * sin(2*pi/5 * fromIntegral i)
                                  y = 225 - 200 * cos(2*pi/5 * fromIntegral i)]
+                   lines = [(i, makeGeometry (xyFromI i) (xyFromI j)) |
+                            i <- [0..4], let j = (i+2) `mod` 5]
                    ns = [(i, NodeView xy) | (i, xy) <- points]
-                   es = [(ij, EdgeView $ makeGeometry (xyFromI i) (xyFromI j)) |
-                         i <- [0..4], let j = (i+2) `mod` 5, let ij = i + 5]
-                   nes = [(i, i + 5, ()) | i <- [0..4]]
-                   ens = [(i + 5, (i+2) `mod` 5, ()) | i <- [0..4]]
+                   es = [(i + 5, EdgeView geom) | (i, geom) <- lines]
+                   ends = [[(i * 2 + 10, EdgeEndView Forward),
+                            (i * 2 + 11, EdgeEndView Reverse)] | i <- [0..4]]
+                   refs = [[(i * 2 + 10, i, ()), (i * 2 + 11, i, ()),
+                            (i * 2 + 10, i + 5, ()), (i * 2 + 11, 5 + (i + 3) `mod` 5, ())]
+                          | i <- [0..4]]
                    xyFromI i = (fromJust $ lookup i points, nodeRadius)
-               in Model $ mkGraph (ns ++ es) (nes ++ ens)
--- initialModel = Model
---                $ mkGraph [(0, NodeView (200, 200) ""),
---                           (1, NodeView (300, 200) ""),
---                           (2, EdgeView (makeGeometry ((200,200),10) ((300,200),10)) "" "" "")]
---                [(0,2,()), (2,1,())]
+               in Model $ mkGraph (ns ++ es ++ concat ends) (concat refs)
+               -- in Model $ mkGraph [] []
 
 type ModelTransition = Model -> Model
 
@@ -182,30 +202,41 @@ liftModel :: (Graph -> Graph) -> ModelTransition
 liftModel f (Model g) = Model (f g)
 
 moveNode :: Element -> Point -> ModelTransition
-moveNode (n, _) xy' = liftModel $ mapElements fixNode fixEdge
+moveNode (n, _) xy' = liftModel $ mapElements fixNode fixEnd fixEdge
     where fixNode (u, NodeView _) | u == n = NodeView xy'
           fixNode (_, uv@(NodeView _)) = uv
-          fixEdge ((u, NodeView uxy), (_, EdgeView geom), (v, NodeView _))
+          fixEnd ((_, endv@(EdgeEndView _)), _, _) = endv
+          fixEdge ((_, EdgeView geom), _, [(u, NodeView uxy), (v, NodeView _)])
               | u == n && v == n = EdgeView $ moveGeometry (xy' ^-^ uxy) $ geom
-          fixEdge ((u, NodeView _), (_, EdgeView geom), (_, NodeView vxy))
+          fixEdge (e@(_, EdgeView _),
+                   ends@[(_, EdgeEndView Reverse), (_, EdgeEndView Forward)],
+                   nodes@[(v, NodeView vxy), (u, NodeView uxy)]) =
+              fixEdge (e, reverse ends, reverse nodes)
+          fixEdge ((_, EdgeView geom),
+                   [(_, EdgeEndView Forward), (_, EdgeEndView Reverse)],
+                   [(u, NodeView uxy), (v, NodeView vxy)])
               | u == n = EdgeView $ snapGeometry xy' vxy $ geom
-          fixEdge ((_, NodeView uxy), (_, EdgeView geom), (v, NodeView _))
               | v == n = EdgeView $ snapGeometry uxy xy' $ geom
-          fixEdge (_, (_, ev), _) = ev
+          fixEdge ((_, ev), _, _) = ev
 
 deleteNode :: Element -> ModelTransition
-deleteNode (n, _) = liftModel $ \g -> delNodes (pre g n ++ [n] ++ suc g n) g
+deleteNode n@(_, NodeView _) = liftModel $ \g ->
+    delNodes (map fst $ n : concatMap (\e -> e : edgeEnds g e) (nodeEdges g n))
+    $ g
 
 addEdge :: Direction -> Element -> Element -> LineString -> ModelTransition
 addEdge Reverse v u geom = addEdge Forward u v $ reverse geom
 addEdge Forward (u, NodeView uxy) (v, NodeView vxy) geom = liftModel $ \g ->
-    let [e] = newNodes 1 g in
-    insEdges [(u, e, ()), (e, v, ())]
-    . insNode (e, EdgeView $ snapGeometry uxy vxy geom)
+    let [e, ue, ve] = newNodes 3 g in
+    insEdges [(ue, u, ()), (ue, e, ()), (ve, v, ()), (ve, e, ())]
+    . insNodes [(e, EdgeView $ snapGeometry uxy vxy geom),
+                (ue, EdgeEndView Forward), (ve, EdgeEndView Reverse)]
     $ g
 
 deleteEdge :: Element -> ModelTransition
-deleteEdge (e, _) = liftModel $ delNode e
+deleteEdge e@(_, EdgeView _) = liftModel $ \g ->
+    delNodes (map fst $ e : edgeEnds g e)
+    $ g
 
 {- The View -}
 
@@ -251,6 +282,7 @@ data ElasticContext = ElasticContext Model ElasticElement
 data ElasticElement = ElasticNode Element
                     | ElasticEdge Direction
                           Element -- fixed node
+                          (Maybe Element) -- Nothing if new, Just edge otherwise
                           (Maybe Element) -- Nothing if new, Just other end otherwise
                           LineString -- current geometry
 
@@ -260,6 +292,10 @@ data Direction = Forward
 liftG :: Direction -> (LineString -> LineString) -> LineString -> LineString
 liftG Forward f = f
 liftG Reverse f = reverse . f . reverse
+
+dirReverse :: Direction -> Direction
+dirReverse Forward = Reverse
+dirReverse Reverse = Forward
 
 type ViewAction = Model -> View -> IO ()
 
@@ -294,7 +330,7 @@ endElasticNode xy' modelRef view = do
 startElasticEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point -> ViewAction
 startElasticEdge dir u@(_, NodeView xy) e v xy' model view = do
     writeIORef' (elasticContext view) $
-        Just $ ElasticContext (maybe id deleteEdge e $ model) $ ElasticEdge dir u v $ geom' e
+        Just $ ElasticContext (maybe id deleteEdge e $ model) $ ElasticEdge dir u e v $ geom' e
     where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
           geom' (Just (_, EdgeView geom)) = liftG dir ((++ [xy']) . init) geom
 
@@ -303,9 +339,9 @@ modifyElasticEdgeGeometry f _ view = do
     ec <- readIORef $ elasticContext view
     modify' ec
     where modify' Nothing = return ()
-          modify' (Just (ElasticContext model' (ElasticEdge dir u v geom))) =
+          modify' (Just (ElasticContext model' (ElasticEdge dir u e v geom))) =
               writeIORef' (elasticContext view) $
-                  Just $ ElasticContext model' $ ElasticEdge dir u v $ liftG dir f $ geom
+                  Just $ ElasticContext model' $ ElasticEdge dir u e v $ liftG dir f $ geom
 
 moveElasticEdge :: Point -> ViewAction
 moveElasticEdge xy' = modifyElasticEdgeGeometry ((++ [xy']) . init)
@@ -317,17 +353,16 @@ releaseElasticEdge xy' modelRef view = do
     (release' ec (hitTest xy' graph)) modelRef view
     where
         release' :: Maybe ElasticContext -> HitTest -> ModelAndViewUpdate (IO ())
-        release' (Just (ElasticContext _ (ElasticEdge dir u Nothing g))) (OnNode v') =
+        release' (Just (ElasticContext _ (ElasticEdge dir u Nothing Nothing g)))
+                 (Just v'@(_, NodeView _)) =
             addEdge dir u v' g <@> clearElasticContext >&> clearDragHandlers
-        release' (Just (ElasticContext _ (ElasticEdge dir u (Just v) g))) (OnNode v') =
-            addEdge dir u v' g . deleteEdge dir u v
+        release' (Just (ElasticContext _ (ElasticEdge dir u (Just e) (Just v) g)))
+                 (Just v'@(_, NodeView _)) =
+            addEdge dir u v' g . deleteEdge e
             <@> clearElasticContext >&> clearDragHandlers
-        release' (Just (ElasticContext _ (ElasticEdge dir u _ _))) _ =
+        release' (Just (ElasticContext _ (ElasticEdge _ _ _ _ _))) _ =
             id <@> modifyElasticEdgeGeometry (++ [xy'])
         release' _ _ = id <@> clearElasticContext >&> clearDragHandlers
-
-        deleteEdge Forward (u, _) (v, _) = liftModel $ delEdge (u, v)
-        deleteEdge Reverse (v, _) (u, _) = liftModel $ delEdge (u, v)
 
 refreshView :: ViewAction
 refreshView _ v = do
@@ -414,7 +449,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderEdge (_, EdgeView g) = renderLineString g
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
-          renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ g))) =
+          renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ _ g))) =
               renderLineString g
           renderElasticEdge _ = return ()
 
@@ -514,6 +549,8 @@ setupView modelRef view = do
     on (nodeDeleteItem $ menu view) menuItemActivate $ run deleteActivated
     on (edgeDeleteItem $ menu view) menuItemActivate $ run deleteActivated
 
+    on (helpAboutItem $ menu view) menuItemActivate $ run dumpGraph
+
     return ()
 
     where run handler = handler modelRef view
@@ -550,19 +587,19 @@ layoutButtonPressed m v = do
 pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
            -> (Double, Double) -> HitTest
            -> ModelAndViewUpdate (IO ())
-pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
-pressed SingleClick LeftButton _ xy (OnNode n) = dragEdge Forward n Nothing Nothing xy
-pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
-pressed SingleClick MiddleButton _ xy (OnEdgeStart (u, e, v)) =
-    dragEdge Reverse v (Just e) (Just u) xy
-pressed SingleClick MiddleButton _ xy (OnEdgeEnd (u, e, v)) =
-    dragEdge Forward u (Just e) (Just v) xy
-pressed SingleClick RightButton bt _ (OnNode n) = id <@> popupNodeMenu n bt
-pressed SingleClick RightButton bt _ (OnEdge e) = id <@> popupEdgeMenu e bt
-pressed SingleClick RightButton bt _ (OnEdgeStart (_, e, _)) =
-    id <@> popupEdgeMenu e bt
-pressed SingleClick RightButton bt _ (OnEdgeEnd (_, e, _)) =
-    id <@> popupEdgeMenu e bt
+pressed SingleClick LeftButton _ xy Nothing = addNewNode xy
+pressed SingleClick LeftButton _ xy (Just n@(_, NodeView _)) =
+    dragEdge Forward n Nothing Nothing xy
+pressed SingleClick MiddleButton _ xy (Just n@(_, NodeView _)) = dragNode n xy
+pressed SingleClick MiddleButton _ xy (Just end@(_, EdgeEndView dir)) = \m view -> do
+    Model g <- readIORef m
+    dragEdge (dirReverse dir) (endNode g $ endOther g end)
+        (Just $ endEdge g end) (Just $ endNode g end) xy m view
+pressed SingleClick RightButton bt _ (Just n@(_, NodeView _)) = id <@> popupNodeMenu n bt
+pressed SingleClick RightButton bt _ (Just e@(_, EdgeView _)) = id <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (Just end@(_, EdgeEndView _)) = \m view -> do
+    Model g <- readIORef m
+    (id <@> popupEdgeMenu (endEdge g end) bt) m view
 pressed _ _ _ _ _ = id <@> idView
 ignorePressed _ _ _ _ _ = id <@> idView
 
@@ -607,11 +644,15 @@ dragEdge dir fixedNode edge otherNode xy =
 deleteActivated :: ModelAndViewUpdate (IO ())
 deleteActivated m v = do
     ctx <- readIORef (context v)
-    (delete' ctx <@> refreshView) m v
+    (delete' ctx <@> refreshView >>> dumpGraph) m v
     where
         delete' (NodeContext n) = deleteNode n
         delete' (EdgeContext e) = deleteEdge e
         delete' _ = id
+
+dumpGraph :: ModelAndViewUpdate (IO ())
+dumpGraph = id <@> dumpGraph'
+    where dumpGraph' = flip $ const print
 
 main :: IO ()
 main = do
