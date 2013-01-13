@@ -74,14 +74,10 @@ type ModelRef = IORef Model
 
 data ElementView =
     NodeView {
-        xy :: Point,
-        nodeLabel :: String
+        xy :: Point
         }
     | EdgeView {
-        geometry :: LineString,
-        sourceLabel :: String,
-        edgeLabel :: String,
-        targetLabel :: String
+        geometry :: LineString
         }
     deriving (Show)
 type Element = LNode ElementView
@@ -104,7 +100,7 @@ mapElements fNode fEdge g = mapNodes f g
                     [v] = suc g ee
 
 nodeNear :: Point -> Element -> Bool
-nodeNear xy (_, NodeView xy' _) = magnitude (xy ^-^ xy') < nodeRadius
+nodeNear xy (_, NodeView {xy = xy'}) = magnitude (xy ^-^ xy') < nodeRadius
 
 type Reference = LEdge ()
 
@@ -118,10 +114,10 @@ edgesEnds :: Graph -> [EdgeEnds]
 edgesEnds g = map (edgeEnds g) . filter isEdge $ labNodes g
 
 endNear :: EdgeEndType -> Point -> EdgeEnds -> Bool
-endNear t xy (_, (_, EdgeView geom _ _ _), _) = magnitude (xy ^-^ t geom) < 10
+endNear t xy (_, (_, EdgeView {geometry = geom }), _) = magnitude (xy ^-^ t geom) < 10
 
 edgeNear :: Point -> Element -> Bool
-edgeNear xy (_, EdgeView geom _ _ _) = any (segmentNear xy) (segments geom)
+edgeNear xy (_, EdgeView {geometry = geom}) = any (segmentNear xy) (segments geom)
 
 segmentNear :: Point -> (Point, Point) -> Bool
 segmentNear xy seg = (segmentDistance xy seg) < 10
@@ -134,10 +130,12 @@ data HitTest = OnNode Element
              deriving (Show)
 
 distanceTo :: Point -> HitTest -> (Int, Double)
-distanceTo xy (OnNode (_, NodeView xy' _)) = (0, magnitude (xy ^-^ xy'))
-distanceTo xy (OnEdgeStart (_, (_, EdgeView g _ _ _), _)) = (1, magnitude (xy ^-^ head g))
-distanceTo xy (OnEdgeEnd   (_, (_, EdgeView g _ _ _), _)) = (1, magnitude (xy ^-^ last g))
-distanceTo xy (OnEdge (_, EdgeView g _ _ _)) =
+distanceTo xy (OnNode (_, NodeView {xy = xy'})) = (0, magnitude (xy ^-^ xy'))
+distanceTo xy (OnEdgeStart (_, (_, EdgeView {geometry = g}), _)) =
+    (1, magnitude (xy ^-^ head g))
+distanceTo xy (OnEdgeEnd   (_, (_, EdgeView {geometry = g}), _)) =
+    (1, magnitude (xy ^-^ last g))
+distanceTo xy (OnEdge (_, EdgeView {geometry = g})) =
     (2, minimum $ map (segmentDistance xy) $ segments g)
 distanceTo _ Nowhere = (9, 0)
 
@@ -168,15 +166,15 @@ moveGeometry dxy = map (^+^ dxy)
 
 
 initialModel :: Model
-initialModel = let ns = [(i, NodeView (x, y) "") | i <- [0..4],
+initialModel = let ns = [(i, NodeView {xy = (x, y)}) | i <- [0..4],
                          let x = 300 + 200 * sin(2*pi/5 * fromIntegral i)
                              y = 225 - 200 * cos(2*pi/5 * fromIntegral i)]
-                   es = [(ij, EdgeView (makeGeometry (xyFromI i) (xyFromI j)) "" "" "") |
+                   es = [(ij, EdgeView {geometry = makeGeometry (xyFromI i) (xyFromI j)}) |
                          i <- [0..4], let j = (i+2) `mod` 5, let ij = i + 5]
                    nes = [(i, i + 5, ()) | i <- [0..4]]
                    ens = [(i + 5, (i+2) `mod` 5, ()) | i <- [0..4]]
                    xyFromI i = (xy $ fromJust $ lookup i ns, nodeRadius)
-               in Model {graph=mkGraph (ns ++ es) (nes ++ ens)}
+               in Model {graph = mkGraph (ns ++ es) (nes ++ ens)}
 -- initialModel = Model
 --                $ mkGraph [(0, NodeView (200, 200) ""),
 --                           (1, NodeView (300, 200) ""),
@@ -186,18 +184,18 @@ initialModel = let ns = [(i, NodeView (x, y) "") | i <- [0..4],
 type ModelTransition = Model -> Model
 
 liftModel :: (Graph -> Graph) -> ModelTransition
-liftModel f m = m {graph=f $ graph m}
+liftModel f m = m {graph = f $ graph m}
 
 moveNode :: Element -> Point -> ModelTransition
 moveNode (n, _) xy' = liftModel $ mapElements fixNode fixEdge
-    where fixNode (u, uv) | u == n = uv{xy=xy'}
+    where fixNode (u, uv) | u == n = uv {xy = xy'}
           fixNode (_, uv) = uv
           fixEdge ((u, uv), (_, ev), (v, _)) | u == n && v == n =
-              ev{geometry=moveGeometry (xy' ^-^ (xy uv)) $ geometry ev}
+              ev {geometry = moveGeometry (xy' ^-^ (xy uv)) $ geometry ev}
           fixEdge ((u, _), (_, ev), (_, vv)) | u == n =
-              ev{geometry=snapGeometry xy' (xy vv) $ geometry ev}
+              ev {geometry = snapGeometry xy' (xy vv) $ geometry ev}
           fixEdge ((_, uv), (_, ev), (v, _)) | v == n =
-              ev{geometry=snapGeometry (xy uv) xy' $ geometry ev}
+              ev {geometry = snapGeometry (xy uv) xy' $ geometry ev}
           fixEdge (_, (_, ev), _) = ev
 
 deleteNode :: Element -> ModelTransition
@@ -207,7 +205,7 @@ addEdge :: Direction -> Element -> Element -> LineString -> ModelTransition
 addEdge Reverse v u geom = addEdge Forward u v $ reverse geom
 addEdge Forward (u, uv) (v, vv) geom = liftModel $ \g -> let [e] = newNodes 1 g in
     insEdges [(u, e, ()), (e, v, ())]
-    . insNode (e, EdgeView (snapGeometry (xy uv) (xy vv) geom) "" "" "")
+    . insNode (e, EdgeView {geometry = snapGeometry (xy uv) (xy vv) geom})
     $ g
 
 deleteEdge :: Element -> ModelTransition
@@ -279,7 +277,7 @@ clearElasticContext model view = do
 startElasticNode :: Element -> Point -> ViewAction
 startElasticNode u@(uId, uv@(NodeView {})) xy' model view = do
     writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticNode (uId, uv{xy=xy'})
+        $ ElasticNode (uId, uv {xy = xy'})
     where m' = moveNode u xy' model
 
 moveElasticNode :: Point -> ViewAction
@@ -298,11 +296,11 @@ endElasticNode xy' modelRef view = do
         endElasticNode' (Just (ElasticContext model' (ElasticNode u))) = moveNode u xy'
 
 startElasticEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point -> ViewAction
-startElasticEdge dir u@(_, NodeView xy _) e v xy' model view = do
+startElasticEdge dir u@(_, NodeView {xy = xy}) e v xy' model view = do
     writeIORef' (elasticContext view) $
         Just $ ElasticContext (maybe id deleteEdge e $ model) $ ElasticEdge dir u v $ geom' e
     where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
-          geom' (Just (_, EdgeView geom _ _ _)) = liftG dir ((++ [xy']) . init) geom
+          geom' (Just (_, EdgeView {geometry = geom})) = liftG dir ((++ [xy']) . init) geom
 
 modifyElasticEdgeGeometry :: (LineString -> LineString) -> ViewAction
 modifyElasticEdgeGeometry f _ view = do
@@ -409,7 +407,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderNodes = mapM_ renderNode
 
           renderNode :: Element -> Render ()
-          renderNode (_, NodeView (x,y) _) = do
+          renderNode (_, NodeView {xy = (x,y)}) = do
               arc x y nodeRadius 0 $ 2*pi
               stroke
 
@@ -417,7 +415,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderEdges = mapM_ renderEdge
 
           renderEdge :: Element -> Render ()
-          renderEdge (_, EdgeView g _ _ _) = renderLineString g
+          renderEdge (_, EdgeView {geometry = g}) = renderLineString g
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
           renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ g))) =
@@ -592,7 +590,7 @@ addNewNode :: Point -> ModelAndViewUpdate (IO ())
 addNewNode xy mref v = do
     model <- readIORef mref
     let [n] = newNodes 1 $ graph model
-        node = (n, NodeView xy "")
+        node = (n, NodeView {xy = xy})
     (liftModel (insNode node) <@> refreshView) mref v
     dragNode node xy mref v
 
