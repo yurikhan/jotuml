@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 import Control.Exception.Base
 import Control.Monad
+import qualified Control.Monad.State.Lazy as S
 import Data.Graph.Inductive hiding (Node, Edge, Graph, Context, context)
 import qualified Data.Graph.Inductive as G
 import Data.IORef
@@ -88,7 +89,7 @@ startElasticNode :: Element -> Point -> ViewAction
 startElasticNode u@(uId, NodeLabel _) xy' model view = do
     writeIORef' (elasticContext view) $ Just $ ElasticContext m'
         $ ElasticNode (uId, NodeLabel xy')
-    where m' = moveNode u xy' model
+    where m' = S.execState (moveNode u xy') model
 
 moveElasticNode :: Point -> ViewAction
 moveElasticNode xy' _ view = do
@@ -102,15 +103,16 @@ endElasticNode xy' modelRef view = do
     ec <- readIORef $ elasticContext view
     (endElasticNode' ec <@> clearElasticContext >&> clearDragHandlers) modelRef view
     where
-        endElasticNode' Nothing = id
+        endElasticNode' Nothing = idModel
         endElasticNode' (Just (ElasticContext model' (ElasticNode u))) = moveNode u xy'
 
 startElasticEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point -> ViewAction
 startElasticEdge dir u@(_, NodeLabel xy) e v xy' model view = do
     writeIORef' (elasticContext view) $
-        Just $ ElasticContext (maybe id deleteEdge e $ model) $ ElasticEdge dir u e v $ geom' e
+        Just $ ElasticContext model' $ ElasticEdge dir u e v $ geom' e
     where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
           geom' (Just (_, EdgeLabel geom)) = liftG dir ((++ [xy']) . init) geom
+          model' = S.execState (maybe idModel deleteEdge e) model
 
 modifyElasticEdgeGeometry :: (LineString -> LineString) -> ViewAction
 modifyElasticEdgeGeometry f _ view = do
@@ -136,11 +138,11 @@ releaseElasticEdge xy' modelRef view = do
             addEdge dir u v' g <@> clearElasticContext >&> clearDragHandlers
         release' (Just (ElasticContext _ (ElasticEdge dir u (Just e) (Just v) g)))
                  (Just v'@(_, NodeLabel _)) =
-            reconnectEdge e dir v' . rerouteEdge e g
+            (rerouteEdge e g >> reconnectEdge e dir v')
             <@> clearElasticContext >&> clearDragHandlers
         release' (Just (ElasticContext _ (ElasticEdge _ _ _ _ _))) _ =
-            id <@> modifyElasticEdgeGeometry (++ [xy'])
-        release' _ _ = id <@> clearElasticContext >&> clearDragHandlers
+            idModel <@> modifyElasticEdgeGeometry (++ [xy'])
+        release' _ _ = idModel <@> clearElasticContext >&> clearDragHandlers
 
 refreshView :: ViewAction
 refreshView _ v = do
@@ -184,7 +186,7 @@ createView = do
 
     layoutButtonPressHandler <- newIORef pressed
     layoutMotionNotifyHandler <- newIORef $ const idView
-    layoutButtonReleaseHandler <- newIORef $ const $ id <@> idView
+    layoutButtonReleaseHandler <- newIORef $ const $ idModel <@> idView
 
     context <- newIORef NoContext
 
@@ -279,7 +281,7 @@ clearDragHandlers :: ViewAction
 clearDragHandlers _ view = do
     writeIORef' (layoutButtonPressHandler view) pressed
     writeIORef' (layoutMotionNotifyHandler view) $ const idView
-    writeIORef' (layoutButtonReleaseHandler view) $ const $ id <@> idView
+    writeIORef' (layoutButtonReleaseHandler view) $ const $ idModel <@> idView
 
 {- The Controller -}
 
@@ -291,11 +293,11 @@ controller m v = do
 
 type ModelAndViewUpdate r = ModelRef -> View -> r
 
-(<@>) :: ModelTransition -> ViewAction -> ModelAndViewUpdate (IO ())
+(<@>) :: ModelAction a -> ViewAction -> ModelAndViewUpdate (IO ())
 infix 6 <@>
-modelTrans <@> viewAction = \ modelRef view -> do
+modelAction <@> viewAction = \ modelRef view -> do
     model <- readIORef modelRef
-    let model' = modelTrans model
+    let model' = S.execState modelAction model
     writeIORef' modelRef $ model'
     viewAction model' view
 
@@ -347,7 +349,7 @@ quitConfirmation = "Do you really want to quit?"
 layoutExposed :: ModelAndViewUpdate (EventM EExpose Bool)
 layoutExposed m v = do
     drawWindow <- eventWindow
-    liftIO $ (id <@> renderView drawWindow) m v
+    liftIO $ (idModel <@> renderView drawWindow) m v
     return True
 
 layoutButtonPressed :: ModelAndViewUpdate (EventM EButton Bool)
@@ -373,20 +375,22 @@ pressed SingleClick MiddleButton _ xy (Just end@(_, EdgeEndLabel dir)) = \mref v
     m <- readIORef mref
     dragEdge (dirReverse dir) (endNode m $ endOther m end)
         (Just $ endEdge m end) (Just $ endNode m end) xy mref view
-pressed SingleClick RightButton bt _ (Just n@(_, NodeLabel _)) = id <@> popupNodeMenu n bt
-pressed SingleClick RightButton bt _ (Just e@(_, EdgeLabel _)) = id <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (Just n@(_, NodeLabel _)) =
+    idModel <@> popupNodeMenu n bt
+pressed SingleClick RightButton bt _ (Just e@(_, EdgeLabel _)) =
+    idModel <@> popupEdgeMenu e bt
 pressed SingleClick RightButton bt _ (Just end@(_, EdgeEndLabel _)) = \mref view -> do
     m <- readIORef mref
-    (id <@> popupEdgeMenu (endEdge m end) bt) mref view
-pressed _ _ _ _ _ = id <@> idView
-ignorePressed _ _ _ _ _ = id <@> idView
+    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
+pressed _ _ _ _ _ = idModel <@> idView
+ignorePressed _ _ _ _ _ = idModel <@> idView
 
 layoutMotionNotify :: ModelAndViewUpdate (EventM EMotion Bool)
 layoutMotionNotify m v = do
     xy <- eventCoordinates
     liftIO $ do
         handler <- readIORef $ layoutMotionNotifyHandler v
-        (id <@> handler xy >&> refreshView >&> showInStatus (`hitTest` xy)) m v
+        (idModel <@> handler xy >&> refreshView >&> showInStatus (`hitTest` xy)) m v
     return True
 
 layoutButtonReleased :: ModelAndViewUpdate (EventM EButton Bool)
@@ -394,7 +398,7 @@ layoutButtonReleased m v = do
     xy <- eventCoordinates
     liftIO $ do
         handler <- readIORef $ layoutButtonReleaseHandler v
-        (handler xy >>> id <@> refreshView) m v
+        (handler xy >>> idModel <@> refreshView) m v
     return True
 
 addNewNode :: Point -> ModelAndViewUpdate (IO ())
@@ -404,7 +408,7 @@ addNewNode xy = addNode xy <@> refreshView
                     dragNode (fromJust $ hitTest m xy) xy mref view
 
 dragNode :: Element -> Point -> ModelAndViewUpdate (IO ())
-dragNode n xy = id
+dragNode n xy = idModel
                 <@> startElasticNode n xy
                 >&> refreshView
                 >&> setDragHandlers moveElasticNode endElasticNode
@@ -412,7 +416,7 @@ dragNode n xy = id
 dragEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point
             -> ModelAndViewUpdate (IO ())
 dragEdge dir fixedNode edge otherNode xy =
-    id
+    idModel
     <@> startElasticEdge dir fixedNode edge otherNode xy
     >&> refreshView
     >&> setDragHandlers moveElasticEdge releaseElasticEdge
@@ -424,10 +428,10 @@ deleteActivated m v = do
     where
         delete' (NodeContext n) = deleteNode n
         delete' (EdgeContext e) = deleteEdge e
-        delete' _ = id
+        delete' _ = idModel
 
 dumpGraph :: ModelAndViewUpdate (IO ())
-dumpGraph = id <@> dumpGraph'
+dumpGraph = idModel <@> dumpGraph'
     where dumpGraph' = flip $ const print
 
 main :: IO ()
