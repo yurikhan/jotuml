@@ -63,17 +63,17 @@ data Menu = Menu {
     }
 
 data Context = NoContext
-             | NodeContext Element
-             | EdgeContext Element
+             | NodeContext Node
+             | EdgeContext Edge
              deriving (Show)
 
 data ElasticContext = ElasticContext Model ElasticElement
 
-data ElasticElement = ElasticNode Element
+data ElasticElement = ElasticNode Node
                     | ElasticEdge Direction
-                          Element -- fixed node
-                          (Maybe Element) -- Nothing if new, Just edge otherwise
-                          (Maybe Element) -- Nothing if new, Just other end otherwise
+                          Node -- fixed node
+                          (Maybe Edge) -- Nothing if new, Just edge otherwise
+                          (Maybe Node) -- Nothing if new, Just other end node otherwise
                           LineString -- current geometry
 
 type ViewAction = Model -> View -> IO ()
@@ -85,10 +85,10 @@ clearElasticContext :: ViewAction
 clearElasticContext model view = do
     writeIORef' (elasticContext view) Nothing
 
-startElasticNode :: Element -> Point -> ViewAction
-startElasticNode u@(uId, NodeLabel _) xy' model view = do
+startElasticNode :: Node -> Point -> ViewAction
+startElasticNode u xy' model view = do
     writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticNode (uId, NodeLabel xy')
+        $ ElasticNode $ nodeMove u xy'
     where m' = S.execState (moveNode u xy') model
 
 moveElasticNode :: Point -> ViewAction
@@ -106,13 +106,14 @@ endElasticNode xy' modelRef view = do
         endElasticNode' Nothing = idModel
         endElasticNode' (Just (ElasticContext model' (ElasticNode u))) = moveNode u xy'
 
-startElasticEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point -> ViewAction
-startElasticEdge dir u@(_, NodeLabel xy) e v xy' model view = do
+startElasticEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point -> ViewAction
+startElasticEdge dir u e v xy' model view = do
     writeIORef' (elasticContext view) $
         Just $ ElasticContext model' $ ElasticEdge dir u e v $ geom' e
     where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
-          geom' (Just (_, EdgeLabel geom)) = liftG dir ((++ [xy']) . init) geom
+          geom' (Just e') = liftG dir ((++ [xy']) . init) $ edgeGeometry model e'
           model' = S.execState (maybe idModel deleteEdge e) model
+          xy = nodeXY model u
 
 modifyElasticEdgeGeometry :: (LineString -> LineString) -> ViewAction
 modifyElasticEdgeGeometry f _ view = do
@@ -134,10 +135,10 @@ releaseElasticEdge xy' modelRef view = do
     where
         release' :: Maybe ElasticContext -> HitTest -> ModelAndViewUpdate (IO ())
         release' (Just (ElasticContext _ (ElasticEdge dir u Nothing Nothing g)))
-                 (Just v'@(_, NodeLabel _)) =
+                 (OnNode v') =
             addEdge dir u v' g <@> clearElasticContext >&> clearDragHandlers
         release' (Just (ElasticContext _ (ElasticEdge dir u (Just e) (Just v) g)))
-                 (Just v'@(_, NodeLabel _)) =
+                 (OnNode v') =
             (rerouteEdge e g >> reconnectEdge e dir v')
             <@> clearElasticContext >&> clearDragHandlers
         release' (Just (ElasticContext _ (ElasticEdge _ _ _ _ _))) _ =
@@ -214,19 +215,20 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
     where elasticModel :: ElasticContext -> Model
           elasticModel (ElasticContext m _) = m
 
-          renderNodes :: [Element] -> Render ()
+          renderNodes :: [Node] -> Render ()
           renderNodes = mapM_ renderNode
 
-          renderNode :: Element -> Render ()
-          renderNode (_, NodeLabel (x,y)) = do
+          renderNode :: Node -> Render ()
+          renderNode n = do
+              let (x, y) = nodeXY model n
               arc x y nodeRadius 0 $ 2*pi
               stroke
 
-          renderEdges :: [Element] -> Render ()
+          renderEdges :: [Edge] -> Render ()
           renderEdges = mapM_ renderEdge
 
-          renderEdge :: Element -> Render ()
-          renderEdge (_, EdgeLabel g) = renderLineString g
+          renderEdge :: Edge -> Render ()
+          renderEdge e = renderLineString $ edgeGeometry model e
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
           renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ _ g))) =
@@ -259,12 +261,12 @@ showInStatus f m v = do
     statusbarPush s contextId $ show $ f m
     return ()
 
-popupNodeMenu :: Element -> Maybe (MouseButton, TimeStamp) -> ViewAction
+popupNodeMenu :: Node -> Maybe (MouseButton, TimeStamp) -> ViewAction
 popupNodeMenu u bt m v = do
     writeIORef' (context v) $ NodeContext u
     menuPopup (nodePopupMenu v) bt
 
-popupEdgeMenu :: Element -> Maybe (MouseButton, TimeStamp) -> ViewAction
+popupEdgeMenu :: Edge -> Maybe (MouseButton, TimeStamp) -> ViewAction
 popupEdgeMenu e bt m v = do
     writeIORef' (context v) $ EdgeContext e
     menuPopup (edgePopupMenu v) bt
@@ -367,19 +369,17 @@ layoutButtonPressed m v = do
 pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
            -> (Double, Double) -> HitTest
            -> ModelAndViewUpdate (IO ())
-pressed SingleClick LeftButton _ xy Nothing = addNewNode xy
-pressed SingleClick LeftButton _ xy (Just n@(_, NodeLabel _)) =
-    dragEdge Forward n Nothing Nothing xy
-pressed SingleClick MiddleButton _ xy (Just n@(_, NodeLabel _)) = dragNode n xy
-pressed SingleClick MiddleButton _ xy (Just end@(_, EdgeEndLabel dir)) = \mref view -> do
+pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
+pressed SingleClick LeftButton _ xy (OnNode n) = dragEdge Forward n Nothing Nothing xy
+pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
+pressed SingleClick MiddleButton _ xy (OnEdgeEnd end) = \mref view -> do
     m <- readIORef mref
+    let dir = endDirection m end
     dragEdge (dirReverse dir) (endNode m $ endOther m end)
         (Just $ endEdge m end) (Just $ endNode m end) xy mref view
-pressed SingleClick RightButton bt _ (Just n@(_, NodeLabel _)) =
-    idModel <@> popupNodeMenu n bt
-pressed SingleClick RightButton bt _ (Just e@(_, EdgeLabel _)) =
-    idModel <@> popupEdgeMenu e bt
-pressed SingleClick RightButton bt _ (Just end@(_, EdgeEndLabel _)) = \mref view -> do
+pressed SingleClick RightButton bt _ (OnNode n) = idModel <@> popupNodeMenu n bt
+pressed SingleClick RightButton bt _ (OnEdge e) = idModel <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (OnEdgeEnd end) = \mref view -> do
     m <- readIORef mref
     (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
 pressed _ _ _ _ _ = idModel <@> idView
@@ -405,15 +405,16 @@ addNewNode :: Point -> ModelAndViewUpdate (IO ())
 addNewNode xy = addNode xy <@> refreshView
                 >>> \mref view -> do
                     m <- readIORef mref
-                    dragNode (fromJust $ hitTest m xy) xy mref view
+                    let OnNode n = hitTest m xy
+                    dragNode n xy mref view
 
-dragNode :: Element -> Point -> ModelAndViewUpdate (IO ())
+dragNode :: Node -> Point -> ModelAndViewUpdate (IO ())
 dragNode n xy = idModel
                 <@> startElasticNode n xy
                 >&> refreshView
                 >&> setDragHandlers moveElasticNode endElasticNode
 
-dragEdge :: Direction -> Element -> Maybe Element -> Maybe Element -> Point
+dragEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point
             -> ModelAndViewUpdate (IO ())
 dragEdge dir fixedNode edge otherNode xy =
     idModel
