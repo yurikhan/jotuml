@@ -18,9 +18,6 @@ import Graphics.UI.Gtk.Windows.MessageDialog
 import Model
 
 
-trace' :: Show a => a -> a
-trace' x = traceShow x x
-
 
 {- The Model -}
 
@@ -70,11 +67,28 @@ data Context = NoContext
 data ElasticContext = ElasticContext Model ElasticElement
 
 data ElasticElement = ElasticNode Node
-                    | ElasticEdge Direction
+                    | ElasticDiamond Edge
+                    | ElasticPath Direction
+                      LineString
+                      (LineString -> ModelAction ())
+                      ElasticPathContext
+
+data ElasticPathContext = ElasticPathFromNode Node
+                        | ElasticPathFromEdgeEnd
                           Node -- fixed node
-                          (Maybe Edge) -- Nothing if new, Just edge otherwise
-                          (Maybe Node) -- Nothing if new, Just other end node otherwise
-                          LineString -- current geometry
+                          EdgeEnd -- fixed end
+                          Edge
+                          EdgeEnd -- moving end
+                          Node -- moving node
+                        | ElasticPathFromEdge Edge
+                        | ElasticPathFromBranchStart
+                          Edge -- donor
+                          EdgeEnd -- breakoff
+                          Node -- fixed node
+                        | ElasticPathFromBranchEnd
+                          Edge -- fixed edge
+                          EdgeEnd -- breakoff
+                          Node -- donor
 
 type ViewAction = Model -> View -> IO ()
 
@@ -106,44 +120,139 @@ endElasticNode xy' modelRef view = do
         endElasticNode' Nothing = idModel
         endElasticNode' (Just (ElasticContext model' (ElasticNode u))) = moveNode u xy'
 
-startElasticEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point -> ViewAction
-startElasticEdge dir u e v xy' model view = do
-    writeIORef' (elasticContext view) $
-        Just $ ElasticContext model' $ ElasticEdge dir u e v $ geom' e
-    where geom' Nothing = makeGeometry (xy, 10) (xy', 0)
-          geom' (Just e') = liftG dir ((++ [xy']) . init) $ edgeGeometry model e'
-          model' = S.execState (maybe idModel deleteEdge e) model
-          xy = nodeXY model u
+startElasticDiamond :: Edge -> Point -> ViewAction
+startElasticDiamond e xy' model view = do
+    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
+        $ ElasticDiamond $ edgeDiamondMove e xy'
+    where m' = S.execState (moveEdgeDiamond e xy') model
 
-modifyElasticEdgeGeometry :: (LineString -> LineString) -> ViewAction
-modifyElasticEdgeGeometry f _ view = do
+moveElasticDiamond :: Point -> ViewAction
+moveElasticDiamond xy' _ view = do
+    ec <- readIORef $ elasticContext view
+    case ec of
+        Just (ElasticContext model' (ElasticDiamond e)) -> startElasticDiamond e xy' model' view
+        _ -> return ()
+
+endElasticDiamond :: Point -> ModelAndViewUpdate (IO ())
+endElasticDiamond xy' modelRef view = do
+    ec <- readIORef $ elasticContext view
+    (endElasticDiamond' ec <@> clearElasticContext >&> clearDragHandlers) modelRef view
+    where
+        endElasticDiamond' Nothing = idModel
+        endElasticDiamond' (Just (ElasticContext model (ElasticDiamond e))) =
+            moveEdgeDiamond e xy'
+
+startElasticPath :: Direction
+                    -> LineString -- initial geometry
+                    -> (LineString -> ModelAction ()) -- update tmp model with new geometry
+                    -> ElasticPathContext
+                    -> ViewAction
+startElasticPath dir geom' setGeom elasticPathContext model view = do
+    writeIORef' (elasticContext view) $ Just
+        $ ElasticContext (S.execState (setGeom geom') model)
+        $ ElasticPath dir geom' setGeom
+        $ elasticPathContext
+
+startElasticPathFromNode :: Node -> Point -> ViewAction
+startElasticPathFromNode u xy' model view = do
+    startElasticPath Forward geom' (const idModel) (ElasticPathFromNode u) model view
+    where geom' = makeGeometry (uxy, 10) (xy', 0)
+          uxy = nodeXY model u
+
+startElasticPathFromEdgeEnd :: EdgeEnd -> Point -> ViewAction
+startElasticPathFromEdgeEnd movingEnd xy' model view =
+    startElasticPath fixedDir geom' (setEdgeGeometry e)
+        (ElasticPathFromEdgeEnd fixedNode fixedEnd e movingEnd movingNode)
+        model view
+    where geom' = liftG fixedDir (snapGeometry (fixedXY, nodeRadius) (xy', 0)) geom
+          geom = edgeGeometry model e
+          fixedDir = endDirection model fixedEnd
+          fixedNode = endNode model fixedEnd
+          fixedXY = nodeXY model fixedNode
+          fixedEnd = endOther model movingEnd
+          e = endEdge model movingEnd
+          movingNode = endNode model movingEnd
+
+startElasticPathFromEdge :: Edge -> Point -> ViewAction
+startElasticPathFromEdge e xy' model view =
+    startElasticPath Forward geom' (const $ splitEdge e exy >> return ())
+        (ElasticPathFromEdge e) model view
+    where geom' = makeGeometry (exy, 10) (xy', 0)
+          exy = projection xy' e
+
+startElasticPathFromBranchStart :: EdgeEnd -> Point -> ViewAction
+startElasticPathFromBranchStart end xy' model view =
+    startElasticPath Reverse geom' (setEdgeEndGeometry end)
+        (ElasticPathFromBranchStart e end w)
+        model view
+    where geom' = snapGeometry (xy', 0) (wxy, 10) geom
+          geom = endGeometry model end
+          e = endEdge model end
+          w = endNode model end
+          wxy = nodeXY model w
+
+startElasticPathFromBranchEnd :: EdgeEnd -> Point -> ViewAction
+startElasticPathFromBranchEnd end xy' model view =
+    startElasticPath Forward geom' (setEdgeEndGeometry end)
+        (ElasticPathFromBranchEnd e end w)
+        model view
+    where geom' = snapGeometry (exy, 10) (xy', 0) geom
+          geom = endGeometry model end
+          e = endEdge model end
+          w = endNode model end
+          exy = edgeDiamondXY model e
+
+modifyElasticPathGeometry :: (LineString -> LineString) -> ViewAction
+modifyElasticPathGeometry f model view = do
     ec <- readIORef $ elasticContext view
     modify' ec
     where modify' Nothing = return ()
-          modify' (Just (ElasticContext model' (ElasticEdge dir u e v geom))) =
-              writeIORef' (elasticContext view) $
-                  Just $ ElasticContext model' $ ElasticEdge dir u e v $ liftG dir f $ geom
+          modify' (Just (ElasticContext _ (ElasticPath dir geom setGeom elasticPathContext))) =
+              writeIORef' (elasticContext view) $ Just
+                  $ ElasticContext (S.execState (setGeom geom') model)
+                  $ ElasticPath dir geom' setGeom elasticPathContext
+                  where geom' = liftG dir f geom
 
-moveElasticEdge :: Point -> ViewAction
-moveElasticEdge xy' = modifyElasticEdgeGeometry ((++ [xy']) . init)
+moveElasticPath :: Point -> ViewAction
+moveElasticPath xy' = modifyElasticPathGeometry ((++ [xy']) . init)
 
-releaseElasticEdge :: Point -> ModelAndViewUpdate (IO ())
-releaseElasticEdge xy' modelRef view = do
+releaseElasticPath :: Point -> ModelAndViewUpdate (IO ())
+releaseElasticPath xy' modelRef view = do
     ec <- readIORef $ elasticContext view
-    model <- readIORef modelRef
-    (release' ec (hitTest model xy')) modelRef view
+    case ec of
+        Nothing -> (idModel <@> endDrag) modelRef view
+        Just (ElasticContext _ ep) -> do
+            model <- readIORef modelRef
+            (release' ep (hitTest model xy')) modelRef view
     where
-        release' :: Maybe ElasticContext -> HitTest -> ModelAndViewUpdate (IO ())
-        release' (Just (ElasticContext _ (ElasticEdge dir u Nothing Nothing g)))
-                 (OnNode v') =
-            addEdge dir u v' g <@> clearElasticContext >&> clearDragHandlers
-        release' (Just (ElasticContext _ (ElasticEdge dir u (Just e) (Just v) g)))
-                 (OnNode v') =
-            (rerouteEdge e g >> reconnectEdge e dir v')
-            <@> clearElasticContext >&> clearDragHandlers
-        release' (Just (ElasticContext _ (ElasticEdge _ _ _ _ _))) _ =
-            idModel <@> modifyElasticEdgeGeometry (++ [xy'])
-        release' _ _ = idModel <@> clearElasticContext >&> clearDragHandlers
+        endDrag = clearElasticContext >&> clearDragHandlers
+        release' :: ElasticElement -> HitTest -> ModelAndViewUpdate (IO ())
+        release' (ElasticPath dir g _ (ElasticPathFromNode u)) (OnNode v') =
+            addEdge dir u v' g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromNode u)) (OnEdge e) =
+            addEdgeEnd e u (reverse g) <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromNode u)) (OnEdgeDiamond e) =
+            addEdgeEnd e u (reverse g) <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromEdge e)) (OnNode w) =
+            addEdgeEnd e w g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromEdgeEnd _ _ _ me _)) (OnNode m') =
+            reconnectEdgeEnd me m' g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromBranchEnd _ we _)) (OnNode w') =
+            reconnectEdgeEnd we w' g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromEdgeEnd _ fe _ _ _)) (OnEdge e') =
+            traceShow dir $
+            makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromEdgeEnd _ fe _ _ _)) (OnEdgeDiamond e') =
+            makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromBranchStart _ we _)) (OnNode u') =
+            makeEdgeFromBranch we u' g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromBranchStart _ we _)) (OnEdge e') =
+            reconnectBranch we e' g <@> endDrag
+        release' (ElasticPath dir g _ (ElasticPathFromBranchStart _ we _)) (OnEdgeDiamond e') =
+            reconnectBranch we e' g <@> endDrag
+        release' (ElasticPath _ _ _ _) _ = idModel <@> modifyElasticPathGeometry (++ [xy'])
+        release' _ _ = idModel <@> endDrag
+
 
 refreshView :: ViewAction
 refreshView _ v = do
@@ -210,6 +319,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
     let model' = maybe model elasticModel ec
     renderNodes $ modelNodes model'
     renderEdges $ modelEdges model'
+    renderBranches $ modelEdgeEnds model'
     renderElasticEdge ec
 
     where elasticModel :: ElasticContext -> Model
@@ -228,10 +338,30 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderEdges = mapM_ renderEdge
 
           renderEdge :: Edge -> Render ()
-          renderEdge e = renderLineString $ edgeGeometry model e
+          renderEdge e
+              | edgeIsHyper model e = renderDiamond $ edgeDiamondXY model e
+              | otherwise           = renderLineString $ edgeGeometry model e
+
+          renderDiamond :: Point -> Render ()
+          renderDiamond xy = renderLineString $ moveGeometry xy
+                             [(nodeRadius, 0), (0, (-nodeRadius)),
+                              ((-nodeRadius), 0), (0, nodeRadius),
+                              (nodeRadius, 0)]
+
+          renderBranches :: [EdgeEnd] -> Render ()
+          renderBranches = mapM_ renderBranch
+
+          renderBranch :: EdgeEnd -> Render ()
+          renderBranch end
+              | endIsHyper model end = renderLineString $ endGeometry model end
+              | otherwise = return ()
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
-          renderElasticEdge (Just (ElasticContext _ (ElasticEdge _ _ _ _ g))) =
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _
+                                                     (ElasticPathFromNode _)))) =
+              renderLineString g
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _
+                                                     (ElasticPathFromEdge _)))) =
               renderLineString g
           renderElasticEdge _ = return ()
 
@@ -370,16 +500,31 @@ pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
            -> (Double, Double) -> HitTest
            -> ModelAndViewUpdate (IO ())
 pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
-pressed SingleClick LeftButton _ xy (OnNode n) = dragEdge Forward n Nothing Nothing xy
+pressed SingleClick LeftButton _ xy (OnNode n) = dragPath $ startElasticPathFromNode n xy
+pressed SingleClick LeftButton _ xy (OnEdge e) = dragPath $ startElasticPathFromEdge e xy
+pressed SingleClick LeftButton _ xy (OnEdgeDiamond e) =
+    dragPath $ startElasticPathFromEdge e xy
 pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
-pressed SingleClick MiddleButton _ xy (OnEdgeEnd end) = \mref view -> do
-    m <- readIORef mref
-    let dir = endDirection m end
-    dragEdge (dirReverse dir) (endNode m $ endOther m end)
-        (Just $ endEdge m end) (Just $ endNode m end) xy mref view
+pressed SingleClick MiddleButton _ xy (OnEdgeDiamond e) = dragEdgeDiamond e xy
+pressed SingleClick MiddleButton _ xy (OnEdgeEnd end) =
+    dragPath $ startElasticPathFromEdgeEnd end xy
+pressed SingleClick MiddleButton _ xy (OnBranchStart end) =
+    dragPath $ startElasticPathFromBranchStart end xy
+pressed SingleClick MiddleButton _ xy (OnBranchEnd end) =
+    dragPath $ startElasticPathFromBranchEnd end xy
 pressed SingleClick RightButton bt _ (OnNode n) = idModel <@> popupNodeMenu n bt
 pressed SingleClick RightButton bt _ (OnEdge e) = idModel <@> popupEdgeMenu e bt
 pressed SingleClick RightButton bt _ (OnEdgeEnd end) = \mref view -> do
+    m <- readIORef mref
+    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
+pressed SingleClick RightButton bt _ (OnEdgeDiamond e) = idModel <@> popupEdgeMenu e bt
+pressed SingleClick RightButton bt _ (OnBranchStart end) = \mref view -> do
+    m <- readIORef mref
+    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
+pressed SingleClick RightButton bt _ (OnBranchEnd end) = \mref view -> do
+    m <- readIORef mref
+    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
+pressed SingleClick RightButton bt _ (OnBranch end) = \mref view -> do
     m <- readIORef mref
     (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
 pressed _ _ _ _ _ = idModel <@> idView
@@ -414,13 +559,15 @@ dragNode n xy = idModel
                 >&> refreshView
                 >&> setDragHandlers moveElasticNode endElasticNode
 
-dragEdge :: Direction -> Node -> Maybe Edge -> Maybe Node -> Point
-            -> ModelAndViewUpdate (IO ())
-dragEdge dir fixedNode edge otherNode xy =
-    idModel
-    <@> startElasticEdge dir fixedNode edge otherNode xy
-    >&> refreshView
-    >&> setDragHandlers moveElasticEdge releaseElasticEdge
+dragEdgeDiamond :: Edge -> Point -> ModelAndViewUpdate (IO ())
+dragEdgeDiamond e xy = idModel
+                       <@> startElasticDiamond e xy
+                       >&> refreshView
+                       >&> setDragHandlers moveElasticDiamond endElasticDiamond
+
+dragPath :: ViewAction -> ModelAndViewUpdate (IO ())
+dragPath va = idModel
+              <@> va >&> refreshView >&> setDragHandlers moveElasticPath releaseElasticPath
 
 deleteActivated :: ModelAndViewUpdate (IO ())
 deleteActivated m v = do

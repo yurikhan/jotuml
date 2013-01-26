@@ -1,17 +1,23 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 module Model
-       (Point, Direction (..), dirReverse, LineString, makeGeometry, liftG,
+       (Point, Direction (..), dirReverse, (^$^),
+        LineString, makeGeometry, liftG, moveGeometry, snapGeometry,
+        Distance (..),
         Model, empty, star, modelNodes, modelEdges, modelEdgeEnds,
         Element, ElementLabel (..),
         Node (), nodeXY, nodeEnds, nodeEdges, nodeRadius, nodeMove,
-        Edge (), edgeGeometry, edgeEnds, edgeNodes,
-        EdgeEnd (), endDirection, endXY, endNode, endEdge, endOthers, endOther,
+        Edge (), edgeIsHyper, edgeDiamondXY, edgeDiamondMove, edgeGeometry, edgeEnds, edgeNodes,
+        EdgeEnd (), endIsHyper, endDirection, endXY, endGeometry, endNode, endEdge,
+        endOthers, endOther,
         HitTest (..), hitTest,
         ModelAction, idModel,
         addNode, moveNode, deleteNode,
-        addEdge, rerouteEdge, reconnectEdge, deleteEdge) where
+        addEdge, addEdgeEnd, splitEdge, detachEdgeEnd, makeBranchFromEdge, makeEdgeFromBranch,
+        setEdgeGeometry, setEdgeEndGeometry,
+        rerouteEdge, rerouteEdgeEnd, reconnectEdge, reconnectEdgeEnd, reconnectBranch,
+        moveEdgeDiamond, deleteEdge) where
 
-import Control.Arrow ((&&&))
+import Control.Arrow ((&&&), (***))
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Monad.State.Lazy as S
 import qualified Data.Graph.Inductive as G
@@ -22,6 +28,9 @@ import Data.VectorSpace ((^+^), (^-^), (<.>))
 import qualified GHC.Exts as Ext
 
 import Debug.Trace
+
+trace' :: Show a => a -> a
+trace' x = traceShow x x
 
 {- Auxiliary: Geometry -}
 
@@ -38,9 +47,30 @@ geomEnd :: Direction -> LineString -> Point
 geomEnd Forward = head
 geomEnd Reverse = last
 
+(^$^) :: Direction -> LineString -> LineString
+Forward ^$^ g = g
+Reverse ^$^ g = reverse g
+
 type Point = (Double, Double)
 type Segment = (Point, Point)
 type LineString = [Point]
+
+class Distance a where
+    distance :: Point -> a -> Double
+    distance xy a = V.magnitude (xy ^-^ projection xy a)
+    projection :: Point -> a -> Point
+instance Distance Point where
+    projection _ xy' = xy'
+instance Distance Segment where
+    projection xy (a, b) = let l2 = V.magnitudeSq $ b ^-^ a
+                               t = ((xy ^-^ a) <.> (b ^-^ a)) / l2
+                           in if l2 == 0 || t < 0 then a
+                              else if t > 1 then b
+                                   else V.lerp a b t
+instance Distance LineString where
+    distance xy geom = minimum . map (distance xy) $ segments geom
+    projection xy geom = snd . head . Ext.sortWith fst
+                         . map (distance xy &&& projection xy) $ segments geom
 
 liftG :: Direction -> (LineString -> LineString) -> LineString -> LineString
 liftG Forward f = f
@@ -49,30 +79,39 @@ liftG Reverse f = reverse . f . reverse
 segments :: LineString -> [Segment]
 segments ls = ls `zip` tail ls
 
-projection :: Point -> Segment -> Point
-projection xy (a, b) = let l2 = V.magnitudeSq $ b ^-^ a
-                           t = ((xy ^-^ a) <.> (b ^-^ a)) / l2
-                       in if l2 == 0 || t < 0 then a
-                          else if t > 1 then b
-                               else V.lerp a b t
-
-segmentDistance :: Point -> (Point, Point) -> Double
-segmentDistance xy seg = V.magnitude (xy ^-^ projection xy seg)
-
+unsegments :: [Segment] -> LineString
+unsegments ss = fst (head ss) : map snd ss
 
 makeGeometry :: (Point, Double) -> (Point, Double) -> LineString
 makeGeometry ((x0, y0), r0) ((x1, y1), r1) = [(x0', y0'), (x1', y1')]
-    where len = V.magnitude $ (x1, y1) ^-^ (x0, y0)
+    where len = distance (x1, y1) (x0, y0)
           (x0', y0') = V.lerp (x0, y0) (x1, y1) (r0/len)
           (x1', y1') = V.lerp (x1, y1) (x0, y0) (r1/len)
 
-snapGeometry xy0 xy1 g
-    | length g > 2 = snapHead xy0 . liftG Reverse (snapHead xy1) $ g
-    | otherwise    = makeGeometry (xy0, 10) (xy1, 10)
-    where snapHead xy0 (_:xys@(xy:_)) =
-              V.lerp xy0 xy (nodeRadius / V.magnitude (xy ^-^ xy0)) : xys
+snapGeometry :: (Point, Double) -> (Point, Double) -> LineString -> LineString
+snapGeometry xyr0 xyr1 g
+    | length g > 2 = snapHead xyr0 . liftG Reverse (snapHead xyr1) $ g
+    | otherwise    = makeGeometry xyr0 xyr1
+snapGeometry_ :: Point -> Point -> LineString -> LineString
+snapGeometry_ xy0 xy1 = snapGeometry (xy0, nodeRadius) (xy1, nodeRadius)
 
+snapHead :: (Point, Double) -> LineString -> LineString
+snapHead (xy0, r0) (_:xys@(xy:_)) = V.lerp xy0 xy (r0 / distance xy xy0) : xys
+snapHead_ :: Point -> LineString -> LineString
+snapHead_ xy = snapHead (xy, nodeRadius)
+
+moveGeometry :: Point -> LineString -> LineString
 moveGeometry dxy = map (^+^ dxy)
+
+-- Split a linestring at a point lying on it. Reverse the first half.
+splitGeometry :: Point -> LineString -> (LineString, LineString)
+splitGeometry xy g
+    | xy `elem` g = (us ++ [xy], vs)
+    | otherwise = (xy : map snd (reverse ss1) ++ [head g],
+                   xy : map fst ss2 ++ [last g])
+    where
+        (us, vs) = break (== xy) g
+        (ss1, _ : ss2) = span ((> distance xy g) . distance xy) $ segments g
 
 {- Auxiliary: Graph operations -}
 
@@ -124,9 +163,11 @@ star = execState (addEdges =<< addNodes) empty
 
 type Graph = G.Gr ElementLabel ()
 
-data ElementLabel = NodeLabel Point
-                  | EdgeLabel LineString
+data ElementLabel = NodeLabel Point -- center of circle
+                  | EdgeLabel LineString -- from Forward end to Reverse end
+                  | HyperEdgeLabel Point -- center of diamond
                   | EdgeEndLabel Direction
+                  | HyperEdgeEndLabel LineString -- from diamond to node
                   deriving (Show)
 
 type Element = G.LNode ElementLabel
@@ -145,6 +186,10 @@ instance ElementClass Edge where
 instance ElementClass EdgeEnd where
     toElement (EdgeEnd e) = e
 
+instance Distance Edge where
+    projection xy (Edge (_, EdgeLabel geom)) = projection xy geom
+    projection _ (Edge (_, HyperEdgeLabel exy)) = exy
+
 sameElement :: ElementClass elt => elt -> elt -> Bool
 sameElement e e' = fst (toElement e) == fst (toElement e')
 
@@ -154,10 +199,12 @@ isNode _ = False
 
 isEdge :: Element -> Bool
 isEdge (_, EdgeLabel _) = True
+isEdge (_, HyperEdgeLabel _) = True
 isEdge _ = False
 
 isEdgeEnd :: Element -> Bool
 isEdgeEnd (_, EdgeEndLabel _) = True
+isEdgeEnd (_, HyperEdgeEndLabel _) = True
 isEdgeEnd _ = False
 
 
@@ -190,8 +237,18 @@ nodeMove :: Node -> Point -> Node
 nodeMove (Node (n, NodeLabel _)) xy' = Node (n, NodeLabel xy')
 
 
+edgeIsHyper :: Model -> Edge -> Bool
+edgeIsHyper _ (Edge (_, HyperEdgeLabel _)) = True
+edgeIsHyper _ _ = False
+
 edgeGeometry :: Model -> Edge -> LineString
 edgeGeometry _ (Edge (_, EdgeLabel geom)) = geom
+
+edgeDiamondXY :: Model -> Edge -> Point
+edgeDiamondXY _ (Edge (_, HyperEdgeLabel xy)) = xy
+
+edgeDiamondMove :: Edge -> Point -> Edge
+edgeDiamondMove (Edge (e, HyperEdgeLabel _)) xy' = Edge (e, HyperEdgeLabel xy')
 
 edgeEndNodeXY :: Model -> Direction -> Edge -> Point
 edgeEndNodeXY m dir e = nodeXY m . endNode m $ edgeEnd m dir e
@@ -206,11 +263,20 @@ edgeNodes :: Model -> Edge -> [Node]
 edgeNodes m e = map (endNode m) $ edgeEnds m e
 
 
+endIsHyper :: Model -> EdgeEnd -> Bool
+endIsHyper _ (EdgeEnd (_, HyperEdgeEndLabel _)) = True
+endIsHyper _ _ = False
+
 endDirection :: Model -> EdgeEnd -> Direction
 endDirection m (EdgeEnd (_, EdgeEndLabel dir)) = dir
 
 endXY :: Model -> EdgeEnd -> Point
-endXY m end = geomEnd (endDirection m end) . edgeGeometry m $ endEdge m end
+endXY m end@(EdgeEnd (_, EdgeEndLabel _)) =
+    geomEnd (endDirection m end) . edgeGeometry m $ endEdge m end
+endXY m end@(EdgeEnd (_, HyperEdgeEndLabel geom)) = last geom
+
+endGeometry :: Model -> EdgeEnd -> LineString
+endGeometry m end@(EdgeEnd (_, HyperEdgeEndLabel geom)) = geom
 
 endNode :: Model -> EdgeEnd -> Node
 endNode m (EdgeEnd e) = Node . head . filter isNode $ elementNeighbors m e
@@ -230,38 +296,59 @@ mapElements :: (Node -> ElementLabel) -- labeled node -> new label
                -> ((Edge, [EdgeEnd], [Node]) -> ElementLabel) -- edge, ends, nodes -> new label
                -> Model -> Model
 mapElements fNode fEnd fEdge m@(Model g) = Model $ mapNodes f g
-    where f n@(_, NodeLabel _) = fNode $ Node n
-          f end@(_, EdgeEndLabel _) = fEnd (end', node, edge)
-              where node = endNode m end'
-                    edge = endEdge m end'
-                    end' = EdgeEnd end
-          f e@(ee, EdgeLabel _) = fEdge (edge, ends, nodes)
-              where ends = edgeEnds m edge
-                    nodes = edgeNodes m edge
-                    edge = Edge e
+    where f elt
+              | isNode elt = fNode $ Node elt
+              | isEdge elt = let
+                  ends = edgeEnds m edge
+                  nodes = edgeNodes m edge
+                  edge = Edge elt
+                  in fEdge (edge, ends, nodes)
+              | isEdgeEnd elt = let
+                  node = endNode m end'
+                  edge = endEdge m end'
+                  end' = EdgeEnd elt
+                  in fEnd (end', node, edge)
 
 
-data HitTest = OnNode Node
-             | OnEdge Edge
-             | OnEdgeEnd EdgeEnd
+data HitTest = OnNode        Node
+             | OnEdge        Edge
+             | OnEdgeDiamond Edge
+             | OnEdgeEnd     EdgeEnd
+             | OnBranchStart EdgeEnd
+             | OnBranch      EdgeEnd
+             | OnBranchEnd   EdgeEnd
              | Nowhere
              deriving (Show)
 
-distanceTo :: Model -> Point -> Element -> (Int, Double)
-distanceTo _ xy   (_, NodeLabel xy')  = (0, V.magnitude (xy ^-^ xy'))
-distanceTo m xy e@(_, EdgeEndLabel _) = (1, V.magnitude (xy ^-^ endXY m (EdgeEnd e)))
-distanceTo _ xy   (_, EdgeLabel geom) = (2, minimum $ map (segmentDistance xy) $ segments geom)
+distanceTo :: Model -> Point -> HitTest -> (Int, Double)
+distanceTo _ xy (OnNode        (Node (_, NodeLabel xy')))      = (0, distance xy xy')
+distanceTo _ xy (OnEdgeDiamond (Edge (_, HyperEdgeLabel xy'))) = (0, distance xy xy')
+distanceTo m xy (OnEdgeEnd e@(EdgeEnd (_, EdgeEndLabel _))) =
+    (1, distance xy $ endXY m e)
+distanceTo _ xy (OnBranchStart (EdgeEnd (_, HyperEdgeEndLabel (xy' : _)))) = 
+    (1, distance xy xy')
+distanceTo _ xy (OnBranchEnd (EdgeEnd (_, HyperEdgeEndLabel geom))) =
+    (1, distance xy $ last geom)
+distanceTo _ xy (OnEdge   (Edge    (_, EdgeLabel geom)))         = (2, distance xy geom)
+distanceTo _ xy (OnBranch (EdgeEnd (_, HyperEdgeEndLabel geom))) = (2, distance xy geom)
+distanceTo _ _ Nowhere = (9, 0)
 
 hitTest :: Model -> Point -> HitTest
-hitTest m xy = case map fst
-                    . Ext.sortWith snd
-                    . filter ((< 10) . snd . snd)
-                    . map (id &&& distanceTo m xy)
-                    $ modelElements m of
-                   [] -> Nowhere
-                   n@(_, NodeLabel _) : _ -> OnNode $ Node n
-                   e@(_, EdgeLabel _) : _ -> OnEdge $ Edge e
-                   end@(_, EdgeEndLabel _) : _ -> OnEdgeEnd $ EdgeEnd end
+hitTest m xy = fst . head
+               . Ext.sortWith snd
+               . filter ((< 10) . snd . snd)
+               . map (id &&& distanceTo m xy)
+               $ possibilities
+    where possibilities =
+              Nowhere
+              : map OnNode nodes
+              ++ map OnEdge binaryEdges
+              ++ map OnEdgeDiamond naryEdges
+              ++ map OnEdgeEnd binaryEnds
+              ++ ([OnBranchStart, OnBranch, OnBranchEnd] <*> naryEnds)
+          nodes = modelNodes m
+          (binaryEdges, naryEdges) = L.partition ((2 ==) . length . edgeEnds m) $ modelEdges m
+          (binaryEnds, naryEnds) = L.partition ((1 ==) . length . endOthers m) $ modelEdgeEnds m
 
 
 type ModelTransition = Model -> Model
@@ -303,24 +390,49 @@ moveNode (Node (n, _)) xy' = modify $ mapElements fixNode fixEnd fixEdge
                    [EdgeEnd (_, EdgeEndLabel Forward), EdgeEnd (_, EdgeEndLabel Reverse)],
                    [Node (u, NodeLabel uxy), Node (v, NodeLabel vxy)])
               | u == n && v == n = EdgeLabel $ moveGeometry (xy' ^-^ uxy) $ geom
-              | u == n     = EdgeLabel $ snapGeometry xy' vxy $ geom
-              | v == n     = EdgeLabel $ snapGeometry uxy xy' $ geom
+              | u == n     = EdgeLabel $ snapGeometry_ xy' vxy $ geom
+              | v == n     = EdgeLabel $ snapGeometry_ uxy xy' $ geom
               | otherwise = ev
-          fixEnd (EdgeEnd (_, endv), _, _) = endv
+          fixEdge (Edge (_, ev@(HyperEdgeLabel _)), _, _) = ev
+          fixEnd (EdgeEnd (_, endv@(EdgeEndLabel _)), _, _) = endv
+          fixEnd (EdgeEnd (_, endv@(HyperEdgeEndLabel geom)), Node (u, _), _)
+              | u == n     = HyperEdgeEndLabel $ liftG Reverse (snapHead_ xy') geom
+              | otherwise = endv
 
 deleteNode :: Node -> ModelAction ()
 deleteNode n = do
     m <- get
-    let es = nodeEdges m n
-        ends = concatMap (edgeEnds m) es
-    modifyGraph $ G.delNodes (map fst $ toElement n : map toElement es ++ map toElement ends)
+    let (binaryEdges, naryEdges) = L.partition ((2 ==) . length . edgeEnds m) $ nodeEdges m n
+        binaryEnds = concatMap (edgeEnds m) binaryEdges
+        naryEnds = filter ((1 <) . length . endOthers m) $ nodeEnds m n
+        ternaryEdges = filter ((3 ==) . length . edgeEnds m) naryEdges
+    modifyGraph . G.delNodes . map fst
+        $ toElement n
+        : map toElement binaryEdges
+        ++ map toElement (binaryEnds ++ naryEnds)
+    mapM_ normalizeEdge ternaryEdges
 
+
+normalizeEdge :: Edge -> ModelAction ()
+normalizeEdge e@(Edge (eId, HyperEdgeLabel xy)) = do
+    m <- get
+    normalize' $ edgeEnds m e
+    where normalize' [EdgeEnd (ue, HyperEdgeEndLabel geom1),
+                      EdgeEnd (ve, HyperEdgeEndLabel geom2)] =
+              modifyGraph
+              $ modifyNodeLabel eId (const $ EdgeLabel geom')
+              . modifyNodeLabel ue (const $ EdgeEndLabel Forward)
+              . modifyNodeLabel ve (const $ EdgeEndLabel Reverse)
+              where
+                  geom' = reverse (tail geom1) ++ xy : tail geom2
+          normalize' _ = return ()
+normalizeEdge _ = return ()
 
 addEdge :: Direction -> Node -> Node -> LineString -> ModelAction (Edge, [EdgeEnd])
 addEdge Reverse v u geom = addEdge Forward u v (reverse geom)
 addEdge Forward (Node (u, NodeLabel uxy)) (Node (v, NodeLabel vxy)) geom = do
     [e, ue, ve] <- G.newNodes 3 <$> getGraph
-    let ee = (e, EdgeLabel $ snapGeometry uxy vxy geom)
+    let ee = (e, EdgeLabel $ snapGeometry_ uxy vxy geom)
         uee = (ue, EdgeEndLabel Forward)
         vee = (ve, EdgeEndLabel Reverse)
     modifyGraph
@@ -328,12 +440,85 @@ addEdge Forward (Node (u, NodeLabel uxy)) (Node (v, NodeLabel vxy)) geom = do
         . G.insNodes [ee, uee, vee]
     return (Edge ee, map EdgeEnd [uee, vee])
 
+splitEdge :: Edge -> Point -> ModelAction Edge
+splitEdge ee@(Edge (e, EdgeLabel geom)) xy = do
+    m <- get
+    let [EdgeEnd (ue, _), EdgeEnd (ve, _)] = map (\d -> edgeEnd m d ee) [Forward, Reverse]
+        exy = projection xy geom
+        (uegeom, vegeom) = snapHead_ exy *** snapHead_ exy $ splitGeometry xy geom
+    modifyGraph
+        $ modifyNodeLabel e (const $ HyperEdgeLabel exy)
+        . modifyNodeLabel ue (const $ HyperEdgeEndLabel uegeom)
+        . modifyNodeLabel ve (const $ HyperEdgeEndLabel vegeom)
+    return $ Edge (e, HyperEdgeLabel exy)
+splitEdge e _ = return e
+
+addEdgeEnd :: Edge -> Node -> LineString -> ModelAction EdgeEnd
+addEdgeEnd ee@(Edge (_, EdgeLabel _)) ww wegeom = do
+    ee' <- splitEdge ee (head wegeom)
+    addEdgeEnd ee' ww wegeom
+addEdgeEnd ee@(Edge (e, HyperEdgeLabel exy)) ww@(Node (w, NodeLabel wxy)) wegeom = do
+    m <- get
+    let [we] = G.newNodes 1 $ modelGraph m
+        wee = (we, HyperEdgeEndLabel $ snapGeometry_ exy wxy wegeom)
+    modifyGraph
+        $ G.insEdges [(we, w, ()), (we, e, ())]
+        . G.insNode wee
+    return $ EdgeEnd wee
+
+detachEdgeEnd :: EdgeEnd -> ModelAction ()
+detachEdgeEnd (EdgeEnd (we, _)) = modifyGraph $ G.delNode we
+
+setEdgeGeometry :: Edge -> LineString -> ModelAction ()
+setEdgeGeometry e@(Edge (eId, EdgeLabel _)) geom' =
+    modifyGraph . modifyNodeLabel eId . const $ EdgeLabel geom'
+
+setEdgeEndGeometry :: EdgeEnd -> LineString -> ModelAction ()
+setEdgeEndGeometry end@(EdgeEnd (endId, HyperEdgeEndLabel _)) geom' =
+    modifyGraph . modifyNodeLabel endId . const $ HyperEdgeEndLabel geom'
+
 rerouteEdge :: Edge -> LineString -> ModelAction ()
 rerouteEdge e@(Edge (eId, _)) geom = do
     m <- get
     let [uxy, vxy] = map (\dir -> edgeEndNodeXY m dir e) [Forward, Reverse]
     modifyGraph $ modifyNodeLabel eId $ \(_, EdgeLabel _) ->
-        EdgeLabel $ snapGeometry uxy vxy geom
+        EdgeLabel $ snapGeometry_ uxy vxy geom
+
+rerouteEdgeEnd :: EdgeEnd -> LineString -> ModelAction ()
+rerouteEdgeEnd end@(EdgeEnd (endId, _)) geom = do
+    m <- get
+    let exy = edgeDiamondXY m $ endEdge m end
+        uxy = nodeXY m $ endNode m end
+    modifyGraph $ modifyNodeLabel endId $ const $ HyperEdgeEndLabel $ snapGeometry_ exy uxy geom
+
+makeBranchFromEdge :: EdgeEnd -> Edge -> LineString -> ModelAction ()
+makeBranchFromEdge fe e'@(Edge (_, EdgeLabel _)) geom' = do
+    e'' <- splitEdge e' $ head geom'
+    makeBranchFromEdge fe e'' geom'
+makeBranchFromEdge fe@(EdgeEnd (feId, _)) e'@(Edge (e'Id, HyperEdgeLabel e'xy)) geom = do
+    m <- get
+    let Edge (eId, _) = endEdge m fe
+        EdgeEnd (meId, _) = endOther m fe
+        Node (_, NodeLabel fxy) = endNode m fe
+    modifyGraph
+        $ G.insEdge (feId, e'Id, ())
+        . G.delNodes [eId, meId]
+        . modifyNodeLabel feId  (const . HyperEdgeEndLabel $ snapGeometry_ e'xy fxy geom)
+
+makeEdgeFromBranch :: EdgeEnd -> Node -> LineString -> ModelAction Edge
+makeEdgeFromBranch vee@(EdgeEnd (ve, _)) (Node (u', NodeLabel u'xy)) geom = do
+    m <- get
+    let [e', u'e'] = G.newNodes 2 $ modelGraph m
+        Node (_, NodeLabel vxy) = endNode m vee
+        ee@(Edge (e, _)) = endEdge m vee
+        e'e = (e', EdgeLabel $ snapGeometry_ u'xy vxy geom)
+    modifyGraph
+        $ G.insEdges [(ve, e', ()), (u'e', u', ()), (u'e', e', ())]
+        . G.delEdge (ve, e)
+        . G.insNodes [e'e, (u'e', EdgeEndLabel Forward)]
+        . modifyNodeLabel ve (const $ EdgeEndLabel Reverse)
+    normalizeEdge ee
+    return $ Edge e'e
 
 reconnectEdge :: Edge -> Direction -> Node -> ModelAction ()
 reconnectEdge e@(Edge (eId, EdgeLabel geom)) dir (Node (v'Id, NodeLabel v'xy)) = do
@@ -348,9 +533,66 @@ reconnectEdge e@(Edge (eId, EdgeLabel geom)) dir (Node (v'Id, NodeLabel v'xy)) =
         . G.insNode (v'eId, vel)
         . G.delNode veId
         . modifyNodeLabel eId (\(_, EdgeLabel geom') ->
-                                EdgeLabel $ liftG dir (snapGeometry uxy v'xy) geom')
+                                EdgeLabel $ liftG dir (snapGeometry_ uxy v'xy) geom')
+
+reconnectEdgeEnd :: EdgeEnd -> Node -> LineString -> ModelAction ()
+reconnectEdgeEnd ve@(EdgeEnd (veId, EdgeEndLabel dir)) (Node (v'Id, NodeLabel v'xy)) geom = do
+    m <- get
+    let Node (vId, _) = endNode m ve
+        Edge (eId, EdgeLabel _) = endEdge m ve
+        Node (_, NodeLabel uxy) = endNode m $ endOther m ve
+    when (vId /= v'Id) $
+        modifyGraph
+        $ G.insEdge (veId, v'Id, ())
+        . G.delEdge (veId, vId)
+        . (modifyNodeLabel eId $ const $ EdgeLabel
+           $ liftG (dirReverse dir) (snapGeometry_ uxy v'xy) geom)
+reconnectEdgeEnd we@(EdgeEnd (weId, HyperEdgeEndLabel _)) (Node (w'Id, NodeLabel w'xy)) geom = do
+    m <- get
+    let Node (wId, _) = endNode m we
+        Edge (_, HyperEdgeLabel exy) = endEdge m we
+    when (wId /= w'Id) $
+        modifyGraph
+        $ G.insEdge (weId, w'Id, ())
+        . G.delEdge (weId, wId)
+        . (modifyNodeLabel weId $ const $ HyperEdgeEndLabel $ snapGeometry_ exy w'xy geom)
+
+reconnectBranch :: EdgeEnd -> Edge -> LineString -> ModelAction ()
+reconnectBranch we e'@(Edge (_, EdgeLabel _)) geom = do
+    e'' <- splitEdge e' $ head geom
+    reconnectBranch we e'' geom
+reconnectBranch we@(EdgeEnd (weId, _)) e'@(Edge (e'Id, HyperEdgeLabel e'xy)) geom = do
+    m <- get
+    let e@(Edge (eId, _)) = endEdge m we
+        Node (_, NodeLabel wxy) = endNode m we
+    when (eId /= e'Id) $
+        modifyGraph
+        $ G.insEdge (weId, e'Id, ())
+        . G.delEdge (weId, eId)
+        . (modifyNodeLabel weId $ const $ HyperEdgeEndLabel $ snapGeometry_ e'xy wxy geom)
+    normalizeEdge e
+
+moveEdgeDiamond :: Edge -> Point -> ModelAction ()
+moveEdgeDiamond e@(Edge (eId, HyperEdgeLabel exy)) xy' = do
+    modify $ mapElements fNode fEnd fEdge
+    where fNode (Node (_, nl)) = nl
+          fEdge (e'@(Edge (_, e'l)), ends, nodes)
+              | sameElement e e' = HyperEdgeLabel xy'
+              | otherwise        = e'l
+          fEnd (EdgeEnd (_, endv@(HyperEdgeEndLabel geom)),
+                Node (_, NodeLabel uxy), Edge (e', _))
+              | e' == eId  = HyperEdgeEndLabel $ snapGeometry_ xy' uxy geom
+              | otherwise = endv
+          fEnd (EdgeEnd (_, endv), _, _) = endv
 
 deleteEdge :: Edge -> ModelAction ()
 deleteEdge e = do
     ends <- edgeEnds <$> get <*> pure e
     modifyGraph $ G.delNodes (map fst $ toElement e : map toElement ends)
+
+deleteEdgeEnd :: EdgeEnd -> ModelAction ()
+deleteEdgeEnd ue = do
+    m <- get
+    let e = endEdge m ue
+    detachEdgeEnd ue
+    normalizeEdge e
