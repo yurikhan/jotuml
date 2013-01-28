@@ -2,6 +2,7 @@
 module Model
        (Point, Direction (..), dirReverse, (^$^),
         LineString, makeGeometry, liftG, moveGeometry, snapGeometry,
+        moveBend, addBend,
         Distance (..),
         Model, empty, star, modelNodes, modelEdges, modelEdgeEnds,
         Element, ElementLabel (..),
@@ -112,6 +113,15 @@ splitGeometry xy g
     where
         (us, vs) = break (== xy) g
         (ss1, _ : ss2) = span ((> distance xy g) . distance xy) $ segments g
+
+moveBend :: Int -> Point -> LineString -> LineString
+moveBend i xy g = let (before, _ : after) = splitAt i g
+                  in before ++ xy : after
+
+addBend :: Int -> Point -> LineString -> LineString
+addBend i xy g = let (before, after) = splitAt (i + 1) g
+                     in before ++ xy : after
+
 
 {- Auxiliary: Graph operations -}
 
@@ -310,13 +320,15 @@ mapElements fNode fEnd fEdge m@(Model g) = Model $ mapNodes f g
                   in fEnd (end', node, edge)
 
 
-data HitTest = OnNode        Node
-             | OnEdge        Edge
-             | OnEdgeDiamond Edge
-             | OnEdgeEnd     EdgeEnd
-             | OnBranchStart EdgeEnd
-             | OnBranch      EdgeEnd
-             | OnBranchEnd   EdgeEnd
+data HitTest = OnNode          Node
+             | OnEdgeSegment   Edge Int -- 0 to n-2 where n = length geom
+             | OnEdgeBend      Edge Int -- 1 to n-2; 0th and (n-1)th report OnEdgeEnd
+             | OnEdgeDiamond   Edge
+             | OnEdgeEnd       EdgeEnd
+             | OnBranchStart   EdgeEnd
+             | OnBranchSegment EdgeEnd Int -- 0 to n-2 outwards
+             | OnBranchBend    EdgeEnd Int -- 1 to n-2 outwards
+             | OnBranchEnd     EdgeEnd
              | Nowhere
              deriving (Show)
 
@@ -329,8 +341,13 @@ distanceTo _ xy (OnBranchStart (EdgeEnd (_, HyperEdgeEndLabel (xy' : _)))) =
     (1, distance xy xy')
 distanceTo _ xy (OnBranchEnd (EdgeEnd (_, HyperEdgeEndLabel geom))) =
     (1, distance xy $ last geom)
-distanceTo _ xy (OnEdge   (Edge    (_, EdgeLabel geom)))         = (2, distance xy geom)
-distanceTo _ xy (OnBranch (EdgeEnd (_, HyperEdgeEndLabel geom))) = (2, distance xy geom)
+distanceTo _ xy (OnEdgeBend (Edge (_, EdgeLabel geom)) i) = (2, distance xy $ geom !! i)
+distanceTo _ xy (OnBranchBend (EdgeEnd (_, HyperEdgeEndLabel geom)) i) =
+    (2, distance xy $ geom !! i)
+distanceTo _ xy (OnEdgeSegment (Edge (_, EdgeLabel geom)) i) =
+    (3, distance xy $ segments geom !! i)
+distanceTo _ xy (OnBranchSegment (EdgeEnd (_, HyperEdgeEndLabel geom)) i) =
+    (3, distance xy $ segments geom !! i)
 distanceTo _ _ Nowhere = (9, 0)
 
 hitTest :: Model -> Point -> HitTest
@@ -342,13 +359,23 @@ hitTest m xy = fst . head
     where possibilities =
               Nowhere
               : map OnNode nodes
-              ++ map OnEdge binaryEdges
+              ++ concatMap edgePossibilities binaryEdges
               ++ map OnEdgeDiamond naryEdges
               ++ map OnEdgeEnd binaryEnds
-              ++ ([OnBranchStart, OnBranch, OnBranchEnd] <*> naryEnds)
+              ++ concatMap branchPossibilities naryEnds
           nodes = modelNodes m
           (binaryEdges, naryEdges) = L.partition ((2 ==) . length . edgeEnds m) $ modelEdges m
           (binaryEnds, naryEnds) = L.partition ((1 ==) . length . endOthers m) $ modelEdgeEnds m
+          edgePossibilities e =
+              map (OnEdgeBend e) [1..n - 2]
+              ++ map (OnEdgeSegment e) [0..n - 2]
+              where n = length $ edgeGeometry m e
+          branchPossibilities end =
+              OnBranchStart end
+              : OnBranchEnd end
+              : map (OnBranchBend end) [1..n - 2]
+              ++ map (OnBranchSegment end) [0..n - 2]
+              where n = length $ endGeometry m end
 
 
 type ModelTransition = Model -> Model
