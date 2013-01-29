@@ -295,24 +295,18 @@ createView = do
 
     window <- builderGetObject builder castToWindow "main_window"
 
-    nodePopupMenu <- builderGetObject builder castToMenu "node_popup_menu"
-    edgePopupMenu <- builderGetObject builder castToMenu "edge_popup_menu"
+    [nodePopupMenu, edgePopupMenu] <-
+        builderGetObject builder castToMenu
+        `mapM` ["node_popup_menu", "edge_popup_menu"]
 
-    fileNewItem <- builderGetObject builder castToMenuItem "file_new_item"
-    fileOpenItem <- builderGetObject builder castToMenuItem "file_open_item"
-    fileSaveItem <- builderGetObject builder castToMenuItem "file_save_item"
-    fileSaveAsItem <- builderGetObject builder castToMenuItem "file_save_as_item"
-    fileQuitItem <- builderGetObject builder castToMenuItem "file_quit_item"
-
-    editCutItem <- builderGetObject builder castToMenuItem "edit_cut_item"
-    editCopyItem <- builderGetObject builder castToMenuItem "edit_copy_item"
-    editPasteItem <- builderGetObject builder castToMenuItem "edit_paste_item"
-    editDeleteItem <- builderGetObject builder castToMenuItem "edit_delete_item"
-
-    helpAboutItem <- builderGetObject builder castToMenuItem "help_about_item"
-
-    nodeDeleteItem <- builderGetObject builder castToMenuItem "node_delete_item"
-    edgeDeleteItem <- builderGetObject builder castToMenuItem "edge_delete_item"
+    [fileNewItem, fileOpenItem, fileSaveItem, fileSaveAsItem, fileQuitItem,
+     editCutItem, editCopyItem, editPasteItem, editDeleteItem,
+     helpAboutItem, nodeDeleteItem, edgeDeleteItem] <-
+        builderGetObject builder castToMenuItem
+        `mapM` ["file_new_item", "file_open_item", "file_save_item",
+                "file_save_as_item", "file_quit_item",
+                "edit_cut_item", "edit_copy_item", "edit_paste_item", "edit_delete_item",
+                "help_about_item", "node_delete_item", "edge_delete_item"]
 
     layout <- builderGetObject builder castToLayout "layout"
 
