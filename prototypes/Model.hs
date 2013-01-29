@@ -13,9 +13,12 @@ module Model
         HitTest (..), hitTest,
         ModelAction, idModel,
         addNode, moveNode, deleteNode,
-        addEdge, addEdgeEnd, splitEdge, detachEdgeEnd, makeBranchFromEdge, makeEdgeFromBranch,
+        addEdge, addEdgeEnd, addEdgeEndAtBend,
+        splitEdge, detachEdgeEnd,
+        makeBranchFromEdge, makeBranchFromEdgeAtBend, makeEdgeFromBranch,
         setEdgeGeometry, setEdgeEndGeometry,
-        rerouteEdge, rerouteEdgeEnd, reconnectEdge, reconnectEdgeEnd, reconnectBranch,
+        rerouteEdge, rerouteEdgeEnd,
+        reconnectEdge, reconnectEdgeEnd, reconnectBranch, reconnectBranchAtBend,
         moveEdgeDiamond, deleteEdge) where
 
 import Control.Arrow ((&&&), (***))
@@ -107,7 +110,7 @@ moveGeometry dxy = map (^+^ dxy)
 -- Split a linestring at a point lying on it. Reverse the first half.
 splitGeometry :: Point -> LineString -> (LineString, LineString)
 splitGeometry xy g
-    | xy `elem` g = (us ++ [xy], vs)
+    | xy `elem` g = (xy : reverse us, vs)
     | otherwise = (xy : map snd (reverse ss1) ++ [head g],
                    xy : map fst ss2 ++ [last g])
     where
@@ -472,7 +475,7 @@ splitEdge ee@(Edge (e, EdgeLabel geom)) xy = do
     m <- get
     let [EdgeEnd (ue, _), EdgeEnd (ve, _)] = map (\d -> edgeEnd m d ee) [Forward, Reverse]
         exy = projection xy geom
-        (uegeom, vegeom) = snapHead_ exy *** snapHead_ exy $ splitGeometry xy geom
+        (uegeom, vegeom) = snapHead_ exy *** snapHead_ exy $ splitGeometry exy geom
     modifyGraph
         $ modifyNodeLabel e (const $ HyperEdgeLabel exy)
         . modifyNodeLabel ue (const $ HyperEdgeEndLabel uegeom)
@@ -492,6 +495,10 @@ addEdgeEnd ee@(Edge (e, HyperEdgeLabel exy)) ww@(Node (w, NodeLabel wxy)) wegeom
         $ G.insEdges [(we, w, ()), (we, e, ())]
         . G.insNode wee
     return $ EdgeEnd wee
+
+addEdgeEndAtBend :: Edge -> Int -> Node -> LineString -> ModelAction EdgeEnd
+addEdgeEndAtBend e@(Edge(_, EdgeLabel egeom)) i w wegeom =
+    addEdgeEnd e w $ snapHead (egeom !! i, 0) wegeom
 
 detachEdgeEnd :: EdgeEnd -> ModelAction ()
 detachEdgeEnd (EdgeEnd (we, _)) = modifyGraph $ G.delNode we
@@ -531,6 +538,10 @@ makeBranchFromEdge fe@(EdgeEnd (feId, _)) e'@(Edge (e'Id, HyperEdgeLabel e'xy)) 
         $ G.insEdge (feId, e'Id, ())
         . G.delNodes [eId, meId]
         . modifyNodeLabel feId  (const . HyperEdgeEndLabel $ snapGeometry_ e'xy fxy geom)
+
+makeBranchFromEdgeAtBend :: EdgeEnd -> Edge -> Int -> LineString -> ModelAction ()
+makeBranchFromEdgeAtBend fe e'@(Edge (_, EdgeLabel egeom)) i geom' =
+    makeBranchFromEdge fe e' $ snapHead (egeom !! i, 0) geom'
 
 makeEdgeFromBranch :: EdgeEnd -> Node -> LineString -> ModelAction Edge
 makeEdgeFromBranch vee@(EdgeEnd (ve, _)) (Node (u', NodeLabel u'xy)) geom = do
@@ -598,6 +609,10 @@ reconnectBranch we@(EdgeEnd (weId, _)) e'@(Edge (e'Id, HyperEdgeLabel e'xy)) geo
         . G.delEdge (weId, eId)
         . (modifyNodeLabel weId $ const $ HyperEdgeEndLabel $ snapGeometry_ e'xy wxy geom)
     normalizeEdge e
+
+reconnectBranchAtBend :: EdgeEnd -> Edge -> Int -> LineString -> ModelAction ()
+reconnectBranchAtBend we e'@(Edge (_, EdgeLabel e'geom)) i geom =
+    reconnectBranch we e' $ snapHead (e'geom !! i, 0) geom
 
 moveEdgeDiamond :: Edge -> Point -> ModelAction ()
 moveEdgeDiamond e@(Edge (eId, HyperEdgeLabel exy)) xy' = do

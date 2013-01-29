@@ -84,7 +84,9 @@ data ElasticPathContext = FromNode Node
                           Edge
                           EdgeEnd -- moving end
                           Node -- moving node
-                        | FromEdge Edge
+                        | FromEdgeBend Edge Int
+                        | FromEdgeSegment Edge Int
+                        | FromEdgeDiamond Edge
                         | FromBranchStart
                           Edge -- donor
                           EdgeEnd -- breakoff
@@ -227,12 +229,22 @@ startElasticPathFromEdgeEnd movingEnd xy' model view =
           e = endEdge model movingEnd
           movingNode = endNode model movingEnd
 
-startElasticPathFromEdge :: Edge -> Point -> ViewAction
-startElasticPathFromEdge e xy' model view =
-    startElasticPath Forward geom' (const $ splitEdge e exy >> return ())
-        (FromEdge e) model view
+startElasticPathFromEdge :: Point -> ElasticPathContext -> Edge -> Point -> ViewAction
+startElasticPathFromEdge exy elasticPathContext e xy' =
+    startElasticPath Forward geom' (const $ splitEdge e exy >> return ()) elasticPathContext
     where geom' = makeGeometry (exy, 10) (xy', 0)
-          exy = projection xy' e
+
+startElasticPathFromEdgeBend :: Edge -> Int -> Point -> ViewAction
+startElasticPathFromEdgeBend e i xy' model view =
+    startElasticPathFromEdge (edgeGeometry model e !! i) (FromEdgeBend e i) e xy' model view
+
+startElasticPathFromEdgeSegment :: Edge -> Int -> Point -> ViewAction
+startElasticPathFromEdgeSegment e i xy' =
+    startElasticPathFromEdge (projection xy' e) (FromEdgeSegment e i) e xy'
+
+startElasticPathFromEdgeDiamond :: Edge -> Point -> ViewAction
+startElasticPathFromEdgeDiamond e xy' model view =
+    startElasticPathFromEdge (edgeDiamondXY model e) (FromEdgeDiamond e) e xy' model view
 
 startElasticPathFromBranchStart :: EdgeEnd -> Point -> ViewAction
 startElasticPathFromBranchStart end xy' model view =
@@ -283,28 +295,32 @@ releaseElasticPath xy' modelRef view = do
         release' :: ElasticElement -> HitTest -> ModelAndViewUpdate (IO ())
         release' (ElasticPath dir g _ (FromNode u)) (OnNode v') =
             addEdge dir u v' g <@> endDrag
-        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeBend e _) =
-            addEdgeEnd e u (reverse g) <@> endDrag
+        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeBend e i) =
+            addEdgeEndAtBend e i u (reverse g) <@> endDrag
         release' (ElasticPath dir g _ (FromNode u)) (OnEdgeSegment e _) =
             addEdgeEnd e u (reverse g) <@> endDrag
         release' (ElasticPath dir g _ (FromNode u)) (OnEdgeDiamond e) =
             addEdgeEnd e u (reverse g) <@> endDrag
-        release' (ElasticPath dir g _ (FromEdge e)) (OnNode w) =
+        release' (ElasticPath dir g _ (FromEdgeBend e i)) (OnNode w) =
+            addEdgeEndAtBend e i w g <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeSegment e _)) (OnNode w) =
+            addEdgeEnd e w g <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeDiamond e)) (OnNode w) =
             addEdgeEnd e w g <@> endDrag
         release' (ElasticPath dir g _ (FromEdgeEnd _ _ _ me _)) (OnNode m') =
             reconnectEdgeEnd me m' g <@> endDrag
         release' (ElasticPath dir g _ (FromBranchEnd _ we _)) (OnNode w') =
             reconnectEdgeEnd we w' g <@> endDrag
-        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeBend e' _) =
-            makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeBend e' i) =
+            makeBranchFromEdgeAtBend fe e' i (dirReverse dir ^$^ g) <@> endDrag
         release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeSegment e' _) =
             makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
         release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeDiamond e') =
             makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
         release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnNode u') =
             makeEdgeFromBranch we u' g <@> endDrag
-        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeBend e' _) =
-            reconnectBranch we e' g <@> endDrag
+        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeBend e' i) =
+            reconnectBranchAtBend we e' i g <@> endDrag
         release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeSegment e' _) =
             reconnectBranch we e' g <@> endDrag
         release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeDiamond e') =
@@ -418,7 +434,12 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
           renderElasticEdge :: Maybe ElasticContext -> Render ()
           renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromNode _)))) =
               renderLineString g
-          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromEdge _)))) =
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromEdgeBend _ _)))) =
+              renderLineString g
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _
+                                                     (FromEdgeSegment _ _)))) =
+              renderLineString g
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromEdgeDiamond _)))) =
               renderLineString g
           renderElasticEdge _ = return ()
 
@@ -558,11 +579,12 @@ pressed :: Click -> MouseButton -> Maybe (MouseButton, TimeStamp)
            -> ModelAndViewUpdate (IO ())
 pressed SingleClick LeftButton _ xy Nowhere = addNewNode xy
 pressed SingleClick LeftButton _ xy (OnNode n) = dragPath $ startElasticPathFromNode n xy
-pressed SingleClick LeftButton _ xy (OnEdgeBend e _) = dragPath $ startElasticPathFromEdge e xy
-pressed SingleClick LeftButton _ xy (OnEdgeSegment e _) =
-    dragPath $ startElasticPathFromEdge e xy
+pressed SingleClick LeftButton _ xy (OnEdgeBend e i) =
+    dragPath $ startElasticPathFromEdgeBend e i xy
+pressed SingleClick LeftButton _ xy (OnEdgeSegment e i) =
+    dragPath $ startElasticPathFromEdgeSegment e i xy
 pressed SingleClick LeftButton _ xy (OnEdgeDiamond e) =
-    dragPath $ startElasticPathFromEdge e xy
+    dragPath $ startElasticPathFromEdgeDiamond e xy
 pressed SingleClick MiddleButton _ xy (OnNode n) = dragNode n xy
 pressed SingleClick MiddleButton _ xy (OnEdgeDiamond e) = dragEdgeDiamond e xy
 pressed SingleClick MiddleButton _ xy (OnEdgeEnd end) =
