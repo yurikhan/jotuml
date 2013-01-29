@@ -5,7 +5,7 @@ module Model
         moveBend, addBend,
         Distance (..),
         Model, empty, star, modelNodes, modelEdges, modelEdgeEnds,
-        Element, ElementLabel (..),
+        Element, ElementLabel (..), LinearElement (..),
         Node (), nodeXY, nodeEnds, nodeEdges, nodeRadius, nodeMove,
         Edge (), edgeIsHyper, edgeDiamondXY, edgeDiamondMove, edgeGeometry, edgeEnds, edgeNodes,
         EdgeEnd (), endIsHyper, endDirection, endXY, endGeometry, endNode, endEdge,
@@ -202,6 +202,16 @@ instance ElementClass EdgeEnd where
 instance Distance Edge where
     projection xy (Edge (_, EdgeLabel geom)) = projection xy geom
     projection _ (Edge (_, HyperEdgeLabel exy)) = exy
+
+class LinearElement a where
+    getGeometry :: Model -> a -> LineString
+    rerouteGeometry :: a -> LineString -> ModelAction ()
+instance LinearElement Edge where
+    getGeometry = edgeGeometry
+    rerouteGeometry = rerouteEdge
+instance LinearElement EdgeEnd where
+    getGeometry = endGeometry
+    rerouteGeometry = rerouteEdgeEnd
 
 sameElement :: ElementClass elt => elt -> elt -> Bool
 sameElement e e' = fst (toElement e) == fst (toElement e')

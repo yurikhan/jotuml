@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, ExistentialQuantification #-}
 import Control.Exception.Base
 import Control.Monad
 import qualified Control.Monad.State.Lazy as S
@@ -72,10 +72,9 @@ data ElasticElement = ElasticNode Node
                       LineString
                       (LineString -> ModelAction ())
                       ElasticPathContext
-                    | ElasticEdgeBend Edge Int
-                    | ElasticEdgeNewBend Edge Int
-                    | ElasticBranchBend EdgeEnd Int
-                    | ElasticBranchNewBend EdgeEnd Int
+                    | forall a . LinearElement a =>
+                      ElasticBend a Int
+                      (Int -> Point -> LineString -> LineString)
 
 data ElasticPathContext = FromNode Node
                         | FromEdgeEnd
@@ -105,43 +104,19 @@ clearElasticContext :: ViewAction
 clearElasticContext model view = do
     writeIORef' (elasticContext view) Nothing
 
-startElasticEdgeBend :: Edge -> Int -> Point -> ViewAction
-startElasticEdgeBend e i xy' model view = do
-    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticEdgeBend e i
-    where m' = S.execState (rerouteEdge e $ moveBend i xy' $ edgeGeometry model e) model
-
-startElasticEdgeNewBend :: Edge -> Int -> Point -> ViewAction
-startElasticEdgeNewBend e i xy' model view = do
-    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticEdgeNewBend e i
-    where m' = S.execState (rerouteEdge e $ addBend i xy' $ edgeGeometry model e) model
-
-startElasticBranchBend :: EdgeEnd -> Int -> Point -> ViewAction
-startElasticBranchBend end i xy' model view = do
-    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticBranchBend end i
-    where m' = S.execState (rerouteEdgeEnd end $ moveBend i xy' $ endGeometry model end) model
-
-startElasticBranchNewBend :: EdgeEnd -> Int -> Point -> ViewAction
-startElasticBranchNewBend end i xy' model view = do
-    writeIORef' (elasticContext view) $ Just $ ElasticContext m'
-        $ ElasticBranchNewBend end i
-    where m' = S.execState (rerouteEdgeEnd end $ addBend i xy' $ endGeometry model end) model
-
+startElasticBend :: LinearElement a
+                    => (Int -> Point -> LineString -> LineString)
+                    -> a -> Int -> Point -> ViewAction
+startElasticBend f e i xy' model view = do
+    writeIORef' (elasticContext view) $ Just $ ElasticContext m' $ ElasticBend e i f
+    where m' = S.execState (rerouteGeometry e $ f i xy' $ getGeometry model e) model
 
 moveElasticBend :: Point -> ViewAction
 moveElasticBend xy' model view = do
     ec <- readIORef $ elasticContext view
     case ec of
-        Just (ElasticContext model' (ElasticEdgeBend e i)) ->
-            startElasticEdgeBend e i xy' model view
-        Just (ElasticContext model' (ElasticEdgeNewBend e i)) ->
-            startElasticEdgeNewBend e i xy' model view
-        Just (ElasticContext model' (ElasticBranchBend e i)) ->
-            startElasticBranchBend e i xy' model view
-        Just (ElasticContext model' (ElasticBranchNewBend e i)) ->
-            startElasticBranchNewBend e i xy' model view
+        Just (ElasticContext model' (ElasticBend e i f)) ->
+            startElasticBend f e i xy' model view
         _ -> return ()
 
 releaseElasticBend :: Point -> ModelAndViewUpdate (IO ())
@@ -149,10 +124,7 @@ releaseElasticBend xy' modelRef view = do
     Just (ElasticContext m' ee) <- readIORef $ elasticContext view
     (release m' ee <@> clearElasticContext >&> clearDragHandlers) modelRef view
     where
-        release m (ElasticEdgeBend e i) = rerouteEdge e $ moveBend i xy' $ edgeGeometry m e
-        release m (ElasticEdgeNewBend e i) = rerouteEdge e $ addBend i xy' $ edgeGeometry m e
-        release m (ElasticBranchBend e i) = rerouteEdgeEnd e $ moveBend i xy' $ endGeometry m e
-        release m (ElasticBranchNewBend e i) = rerouteEdgeEnd e $ addBend i xy' $ endGeometry m e
+        release m (ElasticBend e i f) = rerouteGeometry e $ f i xy' $ getGeometry m e
 
 
 startElasticNode :: Node -> Point -> ViewAction
@@ -593,11 +565,11 @@ pressed SingleClick MiddleButton _ xy (OnBranchStart end) =
     dragPath $ startElasticPathFromBranchStart end xy
 pressed SingleClick MiddleButton _ xy (OnBranchEnd end) =
     dragPath $ startElasticPathFromBranchEnd end xy
-pressed SingleClick MiddleButton _ xy (OnEdgeBend e i) = dragBend $ startElasticEdgeBend e i xy
+pressed SingleClick MiddleButton _ xy (OnEdgeBend e i) = dragBend $ startElasticBend moveBend e i xy
 pressed SingleClick MiddleButton _ xy (OnEdgeSegment e i) =
-    dragBend $ startElasticEdgeNewBend e i xy
-pressed SingleClick MiddleButton _ xy (OnBranchBend e i) = dragBend $ startElasticBranchBend e i xy
-pressed SingleClick MiddleButton _ xy (OnBranchSegment e i) = dragBend $ startElasticBranchNewBend e i xy
+    dragBend $ startElasticBend addBend e i xy
+pressed SingleClick MiddleButton _ xy (OnBranchBend e i) = dragBend $ startElasticBend moveBend e i xy
+pressed SingleClick MiddleButton _ xy (OnBranchSegment e i) = dragBend $ startElasticBend addBend e i xy
 pressed SingleClick RightButton bt _ (OnNode n) = idModel <@> popupNodeMenu n bt
 pressed SingleClick RightButton bt _ (OnEdgeBend e _) = idModel <@> popupEdgeMenu e bt
 pressed SingleClick RightButton bt _ (OnEdgeSegment e _) = idModel <@> popupEdgeMenu e bt
