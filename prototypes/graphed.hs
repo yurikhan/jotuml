@@ -95,6 +95,13 @@ data ElasticPathContext = FromNode Node
                           EdgeEnd -- breakoff
                           Node -- donor
 
+isDangling :: ElasticPathContext -> Bool
+isDangling (FromNode _)          = True
+isDangling (FromEdgeBend _ _)    = True
+isDangling (FromEdgeSegment _ _) = True
+isDangling (FromEdgeDiamond _)   = True
+isDangling _                     = False
+
 type ViewAction = Model -> View -> IO ()
 
 idView :: ViewAction
@@ -335,25 +342,19 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
     setSourceRGB 0 0 0
     ec <- liftIO $ readIORef (elasticContext view)
     let model' = maybe model elasticModel ec
-    renderNodes $ modelNodes model'
-    renderEdges $ modelEdges model'
-    renderBranches $ modelEdgeEnds model'
+    mapM_ renderNode $ modelNodes model'
+    mapM_ renderEdge $ modelEdges model'
+    mapM_ renderBranch $ modelEdgeEnds model'
     renderElasticEdge ec
 
     where elasticModel :: ElasticContext -> Model
           elasticModel (ElasticContext m _) = m
-
-          renderNodes :: [Node] -> Render ()
-          renderNodes = mapM_ renderNode
 
           renderNode :: Node -> Render ()
           renderNode n = do
               let (x, y) = nodeXY model n
               arc x y nodeRadius 0 $ 2*pi
               stroke
-
-          renderEdges :: [Edge] -> Render ()
-          renderEdges = mapM_ renderEdge
 
           renderEdge :: Edge -> Render ()
           renderEdge e
@@ -366,24 +367,14 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
                               ((-nodeRadius), 0), (0, nodeRadius),
                               (nodeRadius, 0)]
 
-          renderBranches :: [EdgeEnd] -> Render ()
-          renderBranches = mapM_ renderBranch
-
           renderBranch :: EdgeEnd -> Render ()
           renderBranch end
               | endIsHyper model end = renderLineString $ endGeometry model end
               | otherwise = return ()
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
-          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromNode _)))) =
-              renderLineString g
-          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromEdgeBend _ _)))) =
-              renderLineString g
-          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _
-                                                     (FromEdgeSegment _ _)))) =
-              renderLineString g
-          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ (FromEdgeDiamond _)))) =
-              renderLineString g
+          renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ ctx)))
+              | isDangling ctx = renderLineString g
           renderElasticEdge _ = return ()
 
           renderLineString :: LineString -> Render ()
