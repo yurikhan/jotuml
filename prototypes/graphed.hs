@@ -196,27 +196,26 @@ startElasticPathFromEdgeDiamond :: Edge -> Point -> ViewAction
 startElasticPathFromEdgeDiamond e xy' model view =
     startElasticPathFromEdge (edgeDiamondXY model e) (FromEdgeDiamond e) e xy' model view
 
-startElasticPathFromBranchStart :: EdgeEnd -> Point -> ViewAction
-startElasticPathFromBranchStart end xy' model view =
-    startElasticPath Reverse geom' (setEdgeEndGeometry end)
-        (FromBranchStart e end w)
+startElasticPathFromBranchTip :: PointElement a
+                                 => Direction
+                                 -> (Edge -> EdgeEnd -> Node -> ElasticPathContext)
+                                 -> (Model -> EdgeEnd -> a)
+                                 -> EdgeEnd -> Point -> ViewAction
+startElasticPathFromBranchTip dir tipType fixed end xy' model view =
+    startElasticPath dir geom' (setEdgeEndGeometry end)
+        (tipType e end w)
         model view
-    where geom' = snapGeometry (xy', 0) (wxy, 10) geom
+    where geom' = liftG dir (snapGeometry (fxy, 10) (xy', 0)) geom
           geom = endGeometry model end
           e = endEdge model end
           w = endNode model end
-          wxy = nodeXY model w
+          fxy = getXY model $ fixed model end
+
+startElasticPathFromBranchStart :: EdgeEnd -> Point -> ViewAction
+startElasticPathFromBranchStart = startElasticPathFromBranchTip Reverse FromBranchStart endNode
 
 startElasticPathFromBranchEnd :: EdgeEnd -> Point -> ViewAction
-startElasticPathFromBranchEnd end xy' model view =
-    startElasticPath Forward geom' (setEdgeEndGeometry end)
-        (FromBranchEnd e end w)
-        model view
-    where geom' = snapGeometry (exy, 10) (xy', 0) geom
-          geom = endGeometry model end
-          e = endEdge model end
-          w = endNode model end
-          exy = edgeDiamondXY model e
+startElasticPathFromBranchEnd = startElasticPathFromBranchTip Forward FromBranchEnd endEdge
 
 modifyElasticPathGeometry :: (LineString -> LineString) -> ViewAction
 modifyElasticPathGeometry f model view = do
