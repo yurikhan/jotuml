@@ -131,7 +131,10 @@ releaseElasticBend xy' modelRef view = do
     Just (ElasticContext m' ee) <- readIORef $ elasticContext view
     (release m' ee <@> clearElasticContext >&> clearDragHandlers) modelRef view
     where
-        release m (ElasticBend e i f) = rerouteGeometry e $ f i xy' $ getGeometry m e
+        release m (ElasticBend e i f) = rerouteGeometry e
+                                        $ normalizeBend i
+                                        $ f i xy'
+                                        $ getGeometry m e
 
 
 startElasticPoint :: PointElement a => a -> Point -> ViewAction
@@ -527,11 +530,14 @@ pressed SingleClick MiddleButton _ xy (OnBranchStart end) =
     dragPath $ startElasticPathFromBranchStart end xy
 pressed SingleClick MiddleButton _ xy (OnBranchEnd end) =
     dragPath $ startElasticPathFromBranchEnd end xy
-pressed SingleClick MiddleButton _ xy (OnEdgeBend e i) = dragBend $ startElasticBend moveBend e i xy
+pressed SingleClick MiddleButton _ xy (OnEdgeBend e i) =
+    dragBend $ startElasticBend moveBend e i xy
 pressed SingleClick MiddleButton _ xy (OnEdgeSegment e i) =
-    dragBend $ startElasticBend addBend e i xy
-pressed SingleClick MiddleButton _ xy (OnBranchBend e i) = dragBend $ startElasticBend moveBend e i xy
-pressed SingleClick MiddleButton _ xy (OnBranchSegment e i) = dragBend $ startElasticBend addBend e i xy
+    dragBend $ startElasticBend addBend e (i + 1) xy
+pressed SingleClick MiddleButton _ xy (OnBranchBend e i) =
+    dragBend $ startElasticBend moveBend e i xy
+pressed SingleClick MiddleButton _ xy (OnBranchSegment e i) =
+    dragBend $ startElasticBend addBend e (i + 1) xy
 pressed SingleClick RightButton bt _ (OnNode n) = idModel <@> popupNodeMenu n bt
 pressed SingleClick RightButton bt _ (OnEdgeBend e _) = idModel <@> popupEdgeMenu e bt
 pressed SingleClick RightButton bt _ (OnEdgeSegment e _) = idModel <@> popupEdgeMenu e bt

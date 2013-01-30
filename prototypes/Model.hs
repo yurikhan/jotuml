@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 module Model
        (Point, Direction (..), dirReverse, (^$^),
-        LineString, makeGeometry, liftG, moveGeometry, snapGeometry,
+        LineString, makeGeometry, liftG, moveGeometry, snapGeometry, normalizeBend,
         moveBend, addBend,
         Distance (..),
         Model, empty, star, modelNodes, modelEdges, modelEdgeEnds,
@@ -21,7 +21,8 @@ module Model
         reconnectEdge, reconnectEdgeEnd, reconnectBranch, reconnectBranchAtBend,
         moveEdgeDiamond, deleteEdge) where
 
-import Control.Arrow ((&&&), (***))
+import qualified Control.Arrow as Ar
+import Control.Arrow ((&&&), (***), (>>>))
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Monad.State.Lazy as S
 import qualified Data.Graph.Inductive as G
@@ -35,6 +36,18 @@ import Debug.Trace
 
 trace' :: Show a => a -> a
 trace' x = traceShow x x
+
+{- Auxiliary: Lists -}
+
+insertBefore :: Int -> a -> [a] -> [a]
+insertBefore i x xs = splitAt i >>> Ar.second (x:) >>> uncurry (++) $ xs
+
+deleteAt :: Int -> [a] -> [a]
+deleteAt i xs = splitAt i >>> Ar.second tail >>> uncurry (++) $ xs
+
+modifyAt :: Int -> (a -> a) -> [a] -> [a]
+modifyAt i f xs = let (before, at : after) = splitAt i xs
+                  in before ++ f at : after
 
 {- Auxiliary: Geometry -}
 
@@ -117,13 +130,22 @@ splitGeometry xy g
         (us, vs) = break (== xy) g
         (ss1, _ : ss2) = span ((> distance xy g) . distance xy) $ segments g
 
+normalizeBend :: Int -> LineString -> LineString
+normalizeBend i g
+    | any (near g0) [gm1, gp1] || flat gm1 g0 gp1 = deleteAt i g
+    | i+2 < length g && flat g0 gp1 gp2 = deleteAt (i+1) g
+    | i-2 >= 0 && flat gm2 gm1 g0 = deleteAt (i-1) g
+    | otherwise = g
+    where [gm2, gm1, g0, gp1, gp2] = [g !! (i + k) | k <- [-2..2]]
+          near xy xy' = distance xy xy' < nodeRadius
+          flat a b c = abs (phi (b ^-^ a) - phi (c ^-^ b)) < pi/18
+          phi (dx, dy) = atan2 dy dx
+
 moveBend :: Int -> Point -> LineString -> LineString
-moveBend i xy g = let (before, _ : after) = splitAt i g
-                  in before ++ xy : after
+moveBend i xy g = modifyAt i (const xy) g
 
 addBend :: Int -> Point -> LineString -> LineString
-addBend i xy g = let (before, after) = splitAt (i + 1) g
-                     in before ++ xy : after
+addBend i xy g = insertBefore i xy g
 
 
 {- Auxiliary: Graph operations -}
@@ -474,7 +496,9 @@ normalizeEdge e@(Edge (eId, HyperEdgeLabel xy)) = do
               . modifyNodeLabel ue (const $ EdgeEndLabel Forward)
               . modifyNodeLabel ve (const $ EdgeEndLabel Reverse)
               where
-                  geom' = reverse (tail geom1) ++ xy : tail geom2
+                  geom' = normalizeBend (length before) $ before ++ xy : after
+                  before = reverse (tail geom1)
+                  after = tail geom2
           normalize' _ = return ()
 normalizeEdge _ = return ()
 
