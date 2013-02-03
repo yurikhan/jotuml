@@ -61,8 +61,7 @@ data Menu = Menu {
 
 data Context = NoContext
              | NodeContext Node
-             | EdgeContext Edge
-             deriving (Show)
+             | forall edge . EdgeElement edge => EdgeContext edge
 
 data ElasticContext = ElasticContext Model ElasticElement
 
@@ -85,14 +84,14 @@ data ElasticPathContext = FromNode Node
                           Node -- moving node
                         | FromEdgeBend Edge Int
                         | FromEdgeSegment Edge Int
-                        | FromEdgeDiamond Edge
+                        | FromEdgeDiamond EdgeDiamond
                         | FromBranchStart
-                          Edge -- donor
-                          EdgeEnd -- breakoff
+                          EdgeDiamond -- donor
+                          EdgeBranch -- breakoff
                           Node -- fixed node
                         | FromBranchEnd
-                          Edge -- fixed edge
-                          EdgeEnd -- breakoff
+                          EdgeDiamond -- fixed edge
+                          EdgeBranch -- breakoff
                           Node -- donor
 
 isDangling :: ElasticPathContext -> Bool
@@ -191,8 +190,9 @@ startElasticPathFromEdgeEnd movingEnd xy' model view =
 
 startElasticPathFromEdge :: Point -> ElasticPathContext -> Edge -> Point -> ViewAction
 startElasticPathFromEdge exy elasticPathContext e xy' =
-    startElasticPath Forward geom' (const $ splitEdge e exy >> return ()) elasticPathContext
+    startElasticPath Forward geom' (const $ splitEdge' e exy >> return ()) elasticPathContext
     where geom' = makeGeometry (exy, 10) (xy', 0)
+
 
 startElasticPathFromEdgeBend :: Edge -> Int -> Point -> ViewAction
 startElasticPathFromEdgeBend e i xy' model view =
@@ -202,30 +202,34 @@ startElasticPathFromEdgeSegment :: Edge -> Int -> Point -> ViewAction
 startElasticPathFromEdgeSegment e i xy' =
     startElasticPathFromEdge (projection xy' e) (FromEdgeSegment e i) e xy'
 
-startElasticPathFromEdgeDiamond :: Edge -> Point -> ViewAction
-startElasticPathFromEdgeDiamond e xy' model view =
-    startElasticPathFromEdge (edgeDiamondXY model e) (FromEdgeDiamond e) e xy' model view
+startElasticPathFromEdgeDiamond :: EdgeDiamond -> Point -> ViewAction
+startElasticPathFromEdgeDiamond d xy' model view =
+    startElasticPath Forward geom' (const idModel) (FromEdgeDiamond d) model view
+    where geom' = makeGeometry (exy, 10) (xy', 0)
+          exy = diamondXY model d
 
 startElasticPathFromBranchTip :: PointElement a
                                  => Direction
-                                 -> (Edge -> EdgeEnd -> Node -> ElasticPathContext)
-                                 -> (Model -> EdgeEnd -> a)
-                                 -> EdgeEnd -> Point -> ViewAction
-startElasticPathFromBranchTip dir tipType fixed end xy' model view =
-    startElasticPath dir geom' (setEdgeEndGeometry end)
-        (tipType e end w)
+                                 -> (EdgeDiamond -> EdgeBranch -> Node -> ElasticPathContext)
+                                 -> (Model -> EdgeBranch -> a)
+                                 -> EdgeBranch -> Point -> ViewAction
+startElasticPathFromBranchTip dir tipType fixed b xy' model view =
+    startElasticPath dir geom' (setBranchGeometry b)
+        (tipType d b w)
         model view
     where geom' = liftG dir (snapGeometry (fxy, 10) (xy', 0)) geom
-          geom = endGeometry model end
-          e = endEdge model end
-          w = endNode model end
-          fxy = getXY model $ fixed model end
+          geom = branchGeometry model b
+          d = branchDiamond model b
+          w = branchNode model b
+          fxy = getXY model $ fixed model b
 
-startElasticPathFromBranchStart :: EdgeEnd -> Point -> ViewAction
-startElasticPathFromBranchStart = startElasticPathFromBranchTip Reverse FromBranchStart endNode
+startElasticPathFromBranchStart :: EdgeBranch -> Point -> ViewAction
+startElasticPathFromBranchStart =
+    startElasticPathFromBranchTip Reverse FromBranchStart branchNode
 
-startElasticPathFromBranchEnd :: EdgeEnd -> Point -> ViewAction
-startElasticPathFromBranchEnd = startElasticPathFromBranchTip Forward FromBranchEnd endEdge
+startElasticPathFromBranchEnd :: EdgeBranch -> Point -> ViewAction
+startElasticPathFromBranchEnd =
+    startElasticPathFromBranchTip Forward FromBranchEnd branchDiamond
 
 modifyElasticPathGeometry :: (LineString -> LineString) -> ViewAction
 modifyElasticPathGeometry f model view = do
@@ -251,40 +255,49 @@ releaseElasticPath xy' modelRef view = do
             (release' ep (hitTest model xy')) modelRef view
     where
         endDrag = clearElasticContext >&> clearDragHandlers
+
         release' :: ElasticElement -> HitTest -> ModelAndViewUpdate (IO ())
+
         release' (ElasticPath dir g _ (FromNode u)) (OnNode v') =
             addEdge dir u v' g <@> endDrag
-        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeBend e i) =
-            addEdgeEndAtBend e i u (reverse g) <@> endDrag
+
+        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeDiamond d) =
+            addBranch d u (reverse g) <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeDiamond d)) (OnNode w) =
+            addBranch d w g <@> endDrag
         release' (ElasticPath dir g _ (FromNode u)) (OnEdgeSegment e _) =
-            addEdgeEnd e u (reverse g) <@> endDrag
-        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeDiamond e) =
-            addEdgeEnd e u (reverse g) <@> endDrag
-        release' (ElasticPath dir g _ (FromEdgeBend e i)) (OnNode w) =
-            addEdgeEndAtBend e i w g <@> endDrag
+            splitEdge e addBranch u (reverse g) <@> endDrag
         release' (ElasticPath dir g _ (FromEdgeSegment e _)) (OnNode w) =
-            addEdgeEnd e w g <@> endDrag
-        release' (ElasticPath dir g _ (FromEdgeDiamond e)) (OnNode w) =
-            addEdgeEnd e w g <@> endDrag
+            splitEdge e addBranch w g <@> endDrag
+        release' (ElasticPath dir g _ (FromNode u)) (OnEdgeBend e i) =
+            splitAtBend e i addBranch u (reverse g) <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeBend e i)) (OnNode w) =
+            splitAtBend e i addBranch w g <@> endDrag
+
         release' (ElasticPath dir g _ (FromEdgeEnd _ _ _ me _)) (OnNode m') =
             reconnectEdgeEnd me m' g <@> endDrag
         release' (ElasticPath dir g _ (FromBranchEnd _ we _)) (OnNode w') =
-            reconnectEdgeEnd we w' g <@> endDrag
-        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeBend e' i) =
-            makeBranchFromEdgeAtBend fe e' i (dirReverse dir ^$^ g) <@> endDrag
-        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeSegment e' _) =
-            makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
+            reconnectBranchNode we w' g <@> endDrag
+
         release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeDiamond e') =
-            makeBranchFromEdge fe e' (dirReverse dir ^$^ g) <@> endDrag
+            makeBranchFromEdge e' fe (dirReverse dir ^$^ g) <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeSegment e' _) =
+            splitEdge e' makeBranchFromEdge fe (dirReverse dir ^$^ g) <@> endDrag
+        release' (ElasticPath dir g _ (FromEdgeEnd _ fe _ _ _)) (OnEdgeBend e' i) =
+            splitAtBend e' i makeBranchFromEdge fe (dirReverse dir ^$^ g) <@> endDrag
+
         release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnNode u') =
             makeEdgeFromBranch we u' g <@> endDrag
-        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeBend e' i) =
-            reconnectBranchAtBend we e' i g <@> endDrag
-        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeSegment e' _) =
-            reconnectBranch we e' g <@> endDrag
+
         release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeDiamond e') =
-            reconnectBranch we e' g <@> endDrag
+            reconnectBranchDiamond e' we g <@> endDrag
+        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeSegment e' _) =
+            splitEdge e' reconnectBranchDiamond we g <@> endDrag
+        release' (ElasticPath dir g _ (FromBranchStart _ we _)) (OnEdgeBend e' i) =
+            splitAtBend e' i reconnectBranchDiamond we g <@> endDrag
+
         release' (ElasticPath _ _ _ _) _ = idModel <@> modifyElasticPathGeometry (++ [xy'])
+
         release' _ _ = idModel <@> endDrag
 
 
@@ -347,7 +360,8 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
     let model' = maybe model elasticModel ec
     mapM_ renderNode $ modelNodes model'
     mapM_ renderEdge $ modelEdges model'
-    mapM_ renderBranch $ modelEdgeEnds model'
+    mapM_ renderDiamond $ modelEdgeDiamonds model'
+    mapM_ renderBranch $ modelEdgeBranches model'
     renderElasticEdge ec
 
     where elasticModel :: ElasticContext -> Model
@@ -360,20 +374,16 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
               stroke
 
           renderEdge :: Edge -> Render ()
-          renderEdge e
-              | edgeIsHyper model e = renderDiamond $ edgeDiamondXY model e
-              | otherwise           = renderLineString $ edgeGeometry model e
+          renderEdge e = renderLineString $ edgeGeometry model e
 
-          renderDiamond :: Point -> Render ()
-          renderDiamond xy = renderLineString $ moveGeometry xy
-                             [(nodeRadius, 0), (0, (-nodeRadius)),
-                              ((-nodeRadius), 0), (0, nodeRadius),
-                              (nodeRadius, 0)]
+          renderDiamond :: EdgeDiamond -> Render ()
+          renderDiamond d = renderLineString $ moveGeometry (diamondXY model d)
+                            [(nodeRadius, 0), (0, (-nodeRadius)),
+                             ((-nodeRadius), 0), (0, nodeRadius),
+                             (nodeRadius, 0)]
 
-          renderBranch :: EdgeEnd -> Render ()
-          renderBranch end
-              | endIsHyper model end = renderLineString $ endGeometry model end
-              | otherwise = return ()
+          renderBranch :: EdgeBranch -> Render ()
+          renderBranch b = renderLineString $ branchGeometry model b
 
           renderElasticEdge :: Maybe ElasticContext -> Render ()
           renderElasticEdge (Just (ElasticContext _ (ElasticPath _ g _ ctx)))
@@ -387,9 +397,7 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
               mapM_ (uncurry lineTo) xys
               renderArrowhead 10 (pi/6) xyN1 xyN
               stroke
-              where xyN = head yxs
-                    xyN1 = head $ tail yxs
-                    yxs = reverse g
+              where xyN : xyN1 : _ = reverse g
 
           renderArrowhead :: Double -> Double -> Point -> Point -> Render ()
           renderArrowhead arrowSize psi (x,y) (x',y') = do
@@ -411,7 +419,7 @@ popupNodeMenu u bt m v = do
     writeIORef' (context v) $ NodeContext u
     menuPopup (nodePopupMenu v) bt
 
-popupEdgeMenu :: Edge -> Maybe (MouseButton, TimeStamp) -> ViewAction
+popupEdgeMenu :: EdgeElement edge => edge -> Maybe (MouseButton, TimeStamp) -> ViewAction
 popupEdgeMenu e bt m v = do
     writeIORef' (context v) $ EdgeContext e
     menuPopup (edgePopupMenu v) bt
@@ -544,19 +552,19 @@ pressed SingleClick RightButton bt _ (OnEdgeSegment e _) = idModel <@> popupEdge
 pressed SingleClick RightButton bt _ (OnEdgeEnd end) = \mref view -> do
     m <- readIORef mref
     (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
-pressed SingleClick RightButton bt _ (OnEdgeDiamond e) = idModel <@> popupEdgeMenu e bt
-pressed SingleClick RightButton bt _ (OnBranchStart end) = \mref view -> do
+pressed SingleClick RightButton bt _ (OnEdgeDiamond d) = idModel <@> popupEdgeMenu d bt
+pressed SingleClick RightButton bt _ (OnBranchStart b) = \mref view -> do
     m <- readIORef mref
-    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
-pressed SingleClick RightButton bt _ (OnBranchEnd end) = \mref view -> do
+    (idModel <@> popupEdgeMenu (branchDiamond m b) bt) mref view
+pressed SingleClick RightButton bt _ (OnBranchEnd b) = \mref view -> do
     m <- readIORef mref
-    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
-pressed SingleClick RightButton bt _ (OnBranchBend end _) = \mref view -> do
+    (idModel <@> popupEdgeMenu (branchDiamond m b) bt) mref view
+pressed SingleClick RightButton bt _ (OnBranchBend b _) = \mref view -> do
     m <- readIORef mref
-    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
-pressed SingleClick RightButton bt _ (OnBranchSegment end _) = \mref view -> do
+    (idModel <@> popupEdgeMenu (branchDiamond m b) bt) mref view
+pressed SingleClick RightButton bt _ (OnBranchSegment b _) = \mref view -> do
     m <- readIORef mref
-    (idModel <@> popupEdgeMenu (endEdge m end) bt) mref view
+    (idModel <@> popupEdgeMenu (branchDiamond m b) bt) mref view
 pressed _ _ _ _ _ = idModel <@> idView
 ignorePressed _ _ _ _ _ = idModel <@> idView
 
@@ -604,7 +612,7 @@ deleteActivated m v = do
     (delete' ctx <@> refreshView) m v
     where
         delete' (NodeContext n) = deleteNode n
-        delete' (EdgeContext e) = deleteEdge e
+        delete' (EdgeContext e) = delete e
         delete' _ = idModel
 
 dumpGraph :: ModelAndViewUpdate (IO ())
