@@ -1,18 +1,20 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 module Model
        (Point, Direction (..), dirReverse, (^$^),
-        LineString, makeGeometry, liftG, moveGeometry, snapGeometry, normalizeBend,
-        moveBend, addBend,
+        LineString, (^.^), moveGeometry, normalizeBend, moveBend, addBend,
         Distance (..),
         Model, empty, star,
-        modelNodes, modelEdges, modelEdgeEnds, modelEdgeDiamonds, modelEdgeBranches,
-        Element, ElementLabel (..), PointElement (..), LinearElement (..), elementId,
-        EdgeElement (..),
-        Node (), nodeXY, snapToNode, nodeEnds, nodeEdges, nodeDiamonds, nodeBranches, nodeRadius,
+        modelNodes, modelEdges, modelEdgeEnds,
+        modelEdgeDiamonds, modelEdgeBranches,
+        Element, ElementLabel (..), elementId,
+        PointElement (..), LinearElement (..), EdgeElement (..),
+        Node (), nodeXY, snapToNode, nodeEnds, nodeEdges,
+        nodeDiamonds, nodeBranches, nodeRadius,
         Edge (), edgeBends, edgeGeometry, edgeEnds, edgeNodes,
         EdgeDiamond (), diamondXY, snapToDiamond, diamondBranches, diamondNodes,
         EdgeEnd (), endDirection, endXY, endNode, endEdge, endOther,
-        EdgeBranch (), branchBends, branchGeometry, branchStartXY, branchEndXY, branchNode, branchDiamond, branchOthers,
+        EdgeBranch (), branchBends, branchGeometry, branchStartXY, branchEndXY,
+        branchNode, branchDiamond, branchOthers,
         HitTest (..), hitTest,
         ModelAction, idModel,
         addNode, moveNode, deleteNode,
@@ -93,33 +95,16 @@ instance Distance LineString where
     projection xy geom = snd . head . Ext.sortWith fst
                          . map (distance xy &&& projection xy) $ segments geom
 
-liftG :: Direction -> (LineString -> LineString) -> LineString -> LineString
-liftG Forward f = f
-liftG Reverse f = reverse . f . reverse
+(^.^) :: Direction -> (LineString -> LineString) -> LineString -> LineString
+infix 8 ^.^
+Forward ^.^ f = f
+Reverse ^.^ f = reverse . f . reverse
 
 segments :: LineString -> [Segment]
 segments ls = ls `zip` tail ls
 
 unsegments :: [Segment] -> LineString
 unsegments ss = fst (head ss) : map snd ss
-
-makeGeometry :: (Point, Double) -> (Point, Double) -> LineString
-makeGeometry ((x0, y0), r0) ((x1, y1), r1) = [(x0', y0'), (x1', y1')]
-    where len = distance (x1, y1) (x0, y0)
-          (x0', y0') = V.lerp (x0, y0) (x1, y1) (r0/len)
-          (x1', y1') = V.lerp (x1, y1) (x0, y0) (r1/len)
-
-snapGeometry :: (Point, Double) -> (Point, Double) -> LineString -> LineString
-snapGeometry xyr0 xyr1 g
-    | length g > 2 = snapHead xyr0 . liftG Reverse (snapHead xyr1) $ g
-    | otherwise    = makeGeometry xyr0 xyr1
-snapGeometry_ :: Point -> Point -> LineString -> LineString
-snapGeometry_ xy0 xy1 = snapGeometry (xy0, nodeRadius) (xy1, nodeRadius)
-
-snapHead :: (Point, Double) -> LineString -> LineString
-snapHead (xy0, r0) (_:xys@(xy:_)) = V.lerp xy0 xy (r0 / distance xy xy0) : xys
-snapHead_ :: Point -> LineString -> LineString
-snapHead_ xy = snapHead (xy, nodeRadius)
 
 moveGeometry :: Point -> LineString -> LineString
 moveGeometry dxy = map (^+^ dxy)
@@ -158,9 +143,10 @@ addBend i xy g = insertBefore i xy g
 {- Auxiliary: Graph operations -}
 
 mapNodes :: G.DynGraph gr => (G.LNode a -> a) -> gr a b -> gr a b
-mapNodes f g = if G.isEmpty g then g
-               else let ((inLinks, nodeId, nodeLabel, outLinks), g') = G.matchAny g
-                    in (inLinks, nodeId, f (nodeId, nodeLabel), outLinks) G.& mapNodes f g'
+mapNodes f g
+    | G.isEmpty g = g
+    | otherwise = let ((ins, n, l, outs), g') = G.matchAny g
+                  in (ins, n, f (n, l), outs) G.& mapNodes f g'
 
 node :: G.Graph gr => gr a b -> G.Node -> G.LNode a
 node g n = (n, l) where Just l = G.lab g n
@@ -201,7 +187,7 @@ star = S.execState (addEdges =<< addNodes) empty
 type Graph = G.Gr ElementLabel ()
 
 data ElementLabel = NodeLabel Point -- center of circle
-                  | EdgeLabel LineString -- bends from Forward end to Reverse end
+                  | EdgeLabel LineString -- bends from Forward to Reverse end
                   | EdgeDiamondLabel Point -- center of diamond
                   | EdgeEndLabel Direction
                   | EdgeBranchLabel LineString -- bends from diamond to node
@@ -327,7 +313,10 @@ edgeBends :: Model -> Edge -> LineString
 edgeBends _ (Edge (_, EdgeLabel bends)) = bends
 
 edgeGeometry :: Model -> Edge -> LineString
-edgeGeometry m e = snapToNode m u . tail . liftG Reverse (snapToNode m v) $ uxy : bs
+edgeGeometry m e = snapToNode m u
+                   . tail
+                   . (Reverse ^.^ snapToNode m v)
+                   $ uxy : bs
     where [u, v] = edgeNodes m e
           uxy = nodeXY m u
           bs = edgeBends m e
@@ -384,7 +373,7 @@ branchBends :: Model -> EdgeBranch -> LineString
 branchBends _ (EdgeBranch (_, EdgeBranchLabel bends)) = bends
 
 branchGeometry :: Model -> EdgeBranch -> LineString
-branchGeometry m b = liftG Reverse (snapToNode m n)
+branchGeometry m b = (Reverse ^.^ snapToNode m n)
                      . init
                      . snapToDiamond m d
                      $ bs ++ [nxy]
@@ -412,10 +401,12 @@ branchOthers m b = L.deleteBy (===) b . diamondBranches m $ branchDiamond m b
 idE :: ElementClass elt => (elt, context) -> Maybe ElementLabel
 idE = const Nothing
 
-mapElements :: ((Node, ()) -> Maybe ElementLabel) -- labeled node -> new label
-               -> ((EdgeEnd, (Node, Edge)) -> Maybe ElementLabel) -- end, node, edge -> new label
+-- Transform each kind of graph elements’ labels with a suitable function.
+-- Each function is passed the neighborhood of the element being tranformed.
+-- For fEdge, the (end, node) pairs are ordered Forward first, Reverse last.
+mapElements :: ((Node, ()) -> Maybe ElementLabel)
+               -> ((EdgeEnd, (Node, Edge)) -> Maybe ElementLabel)
                -> ((Edge, [(EdgeEnd, Node)]) -> Maybe ElementLabel)
-                   -- edge, [(Forward end, Forward node), (Reverse end, Reverse node)]
                -> ((EdgeBranch, (Node, EdgeDiamond)) -> Maybe ElementLabel)
                -> ((EdgeDiamond, [(EdgeBranch, Node)]) -> Maybe ElementLabel)
                -> Model -> Model
@@ -424,7 +415,8 @@ mapElements fNode fEnd fEdge fBranch fDiamond m@(Model g) = Model $ mapNodes f g
               | isNode elt = label' $ fNode (Node elt, ())
               | isEdge elt = let
                   edge = Edge elt
-                  endsNodes = map (id &&& endNode m) $ edgeEnds m edge
+                  endsNodes = map (id &&& endNode m)
+                              $ edgeEnds m edge
                   in label' $ fEdge (edge, endsNodes)
               | isEdgeEnd elt = let
                   end = EdgeEnd elt
@@ -433,7 +425,8 @@ mapElements fNode fEnd fEdge fBranch fDiamond m@(Model g) = Model $ mapNodes f g
                   in label' $ fEnd (end, (node, edge))
               | isEdgeDiamond elt = let
                   diamond = EdgeDiamond elt
-                  branchesNodes = map (id &&& branchNode m) $ diamondBranches m diamond
+                  branchesNodes = map (id &&& branchNode m)
+                                  $ diamondBranches m diamond
                   in label' $ fDiamond (diamond, branchesNodes)
               | isEdgeBranch elt = let
                   branch = EdgeBranch elt
@@ -446,7 +439,7 @@ mapElements fNode fEnd fEdge fBranch fDiamond m@(Model g) = Model $ mapNodes f g
 
 data HitTest = OnNode          Node
              | OnEdgeSegment   Edge Int -- 0 to n-2 where n = length geom
-             | OnEdgeBend      Edge Int -- 1 to n-2; 0th and (n-1)th report OnEdgeEnd
+             | OnEdgeBend      Edge Int -- 1 to n-2; see also OnEdgeEnd
              | OnEdgeDiamond   EdgeDiamond
              | OnEdgeEnd       EdgeEnd
              | OnBranchStart   EdgeBranch
@@ -457,16 +450,19 @@ data HitTest = OnNode          Node
              deriving (Show)
 
 distanceTo :: Model -> Point -> HitTest -> (Int, Double)
-distanceTo m xy (OnNode n)            = (0, distance xy $ nodeXY m n)
-distanceTo m xy (OnEdgeDiamond d)     = (0, distance xy $ diamondXY m d)
-distanceTo m xy (OnEdgeEnd e)         = (1, distance xy $ endXY m e)
-distanceTo m xy (OnBranchStart b)     = (1, distance xy $ branchStartXY m b)
-distanceTo m xy (OnBranchEnd b)       = (1, distance xy $ branchEndXY m b)
-distanceTo m xy (OnEdgeBend e i)      = (2, distance xy $ edgeBends m e !! (i-1))
-distanceTo m xy (OnBranchBend b i)    = (2, distance xy $ branchBends m b !! (i-1))
-distanceTo m xy (OnEdgeSegment e i)   = (3, distance xy $ segments (edgeGeometry m e) !! i)
-distanceTo m xy (OnBranchSegment b i) = (3, distance xy $ segments (branchGeometry m b) !! i)
-distanceTo _  _  Nowhere              = (9, 0)
+distanceTo m xy ht = case ht of
+    OnNode n            -> 0 ^+ nodeXY m n
+    OnEdgeDiamond d     -> 0 ^+ diamondXY m d
+    OnEdgeEnd e         -> 1 ^+ endXY m e
+    OnBranchStart b     -> 1 ^+ branchStartXY m b
+    OnBranchEnd b       -> 1 ^+ branchEndXY m b
+    OnEdgeBend e i      -> 2 ^+ edgeBends m e !! (i-1)
+    OnBranchBend b i    -> 2 ^+ branchBends m b !! (i-1)
+    OnEdgeSegment e i   -> 3 ^+ segments (edgeGeometry m e) !! i
+    OnBranchSegment b i -> 3 ^+ segments (branchGeometry m b) !! i
+    Nowhere             -> 9 ^+ xy
+    where rank ^+ geom = (rank, distance xy geom)
+          infix 0 ^+
 
 hitTest :: Model -> Point -> HitTest
 hitTest m xy = fst
@@ -523,7 +519,7 @@ moveNode n@(Node (_, NodeLabel xy)) xy' =
     where fNode (n', _) | n === n' = Just $ NodeLabel xy'
                         | otherwise = Nothing
           fEdge (Edge (_, EdgeLabel bends), [(_, n'), (_, n'')])
-              | n === n' && n === n'' = Just . EdgeLabel $ map (^+^ dxy) bends
+              | n === n' && n === n'' = Just . EdgeLabel $ moveGeometry dxy bends
               | otherwise = Nothing
           dxy = xy' ^-^ xy
 
@@ -669,7 +665,10 @@ reconnectBranchNode wdb@(EdgeBranch (wd, _)) (Node (w', _)) bends = do
 
 -- Disconnect the BRANCH from its diamond and reconnect to another DIAMOND.
 -- Reroute through BENDS.
-reconnectBranchDiamond :: EdgeDiamond -> EdgeBranch -> LineString -> ModelAction ()
+reconnectBranchDiamond :: EdgeDiamond
+                          -> EdgeBranch
+                          -> LineString
+                          -> ModelAction ()
 reconnectBranchDiamond (EdgeDiamond (d', _)) wdb@(EdgeBranch (wd, _)) bends = do
     dd@(EdgeDiamond (d, _)) <- S.gets branchDiamond <*> pure wdb
     S.when (d /= d') $
