@@ -1,13 +1,14 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 module Model
-       (Point, Direction (..), dirReverse, (^$^),
+       (Point, Size, Direction (..), dirReverse, (^$^),
         LineString, (^.^), moveGeometry, normalizeBend, moveBend, addBend,
         Distance (..),
         Model, empty, star,
         modelNodes, modelEdges, modelEdgeEnds,
         modelEdgeDiamonds, modelEdgeBranches,
-        Element, ElementLabel (..), elementId,
+        Element, ElementLabel (..), elementId, (===),
         PointElement (..), LinearElement (..), EdgeElement (..),
+        TextElement (..), SizeElement (..),
         Node (), nodeXY, nodeSize, nodeText,
         nodeBoundary, snapToNode, nodeEnds, nodeEdges,
         nodeDiamonds, nodeBranches, nodeRadius,
@@ -196,11 +197,11 @@ data ElementLabel = NodeLabel Point Size String -- center of rectangle, text
                   deriving (Eq, Ord, Show)
 
 type Element = G.LNode ElementLabel
-newtype Node = Node Element deriving (Show)
-newtype Edge = Edge Element deriving (Show)
-newtype EdgeEnd = EdgeEnd Element deriving (Show)
-newtype EdgeDiamond = EdgeDiamond Element deriving (Show)
-newtype EdgeBranch = EdgeBranch Element deriving (Show)
+newtype Node = Node Element deriving (Show, Eq)
+newtype Edge = Edge Element deriving (Show, Eq)
+newtype EdgeEnd = EdgeEnd Element deriving (Show, Eq)
+newtype EdgeDiamond = EdgeDiamond Element deriving (Show, Eq)
+newtype EdgeBranch = EdgeBranch Element deriving (Show, Eq)
 
 class    ElementClass elt         where toElement :: elt -> Element
 instance ElementClass Element     where toElement                 = id
@@ -244,6 +245,12 @@ instance LinearElement EdgeBranch where
 class EdgeElement a where delete :: a -> ModelAction ()
 instance EdgeElement Edge where delete = deleteEdge
 instance EdgeElement EdgeDiamond where delete = deleteEdgeDiamond
+
+class TextElement a where setText :: a -> String -> ModelAction ()
+instance TextElement Node where setText = setNodeText
+
+class SizeElement a where resize :: a -> Size -> ModelAction ()
+instance SizeElement Node where resize = resizeNode
 
 (===) :: ElementClass elt => elt -> elt -> Bool
 (===) = (==) `on` elementId
@@ -302,11 +309,11 @@ nodeText _ (Node (_, NodeLabel _ _ s)) = s
 
 nodeBoundary :: Model -> Node -> LineString
 nodeBoundary _ (Node (_, NodeLabel (x, y) (w, h) _)) =
-    [(x - w/2, y - w/2),
-     (x - w/2, y + w/2),
-     (x + w/2, y + w/2),
-     (x + w/2, y - w/2),
-     (x - w/2, y - w/2)]
+    [(x - w/2, y - h/2),
+     (x - w/2, y + h/2),
+     (x + w/2, y + h/2),
+     (x + w/2, y - h/2),
+     (x - w/2, y - h/2)]
 
 snapToNode :: Model -> Node -> LineString -> LineString
 snapToNode m n geom@(xy':_) =
@@ -463,7 +470,7 @@ data HitTest = OnNode          Node
              | OnBranchBend    EdgeBranch Int -- 1 to n-2 outwards
              | OnBranchEnd     EdgeBranch
              | Nowhere
-             deriving (Show)
+             deriving (Show, Eq)
 
 distanceTo :: Model -> Point -> HitTest -> (Int, Maybe Double)
 distanceTo m xy ht = case ht of
@@ -543,6 +550,16 @@ moveNode n@(Node (_, NodeLabel xy wh name)) xy' =
               | n === n' && n === n'' = Just . EdgeLabel $ moveGeometry dxy bends
               | otherwise = Nothing
           dxy = xy' ^-^ xy
+
+setNodeText :: Node -> String -> ModelAction ()
+setNodeText (Node (n, _)) text =
+    modifyGraph $ modifyNodeLabel n $
+        \(_, NodeLabel xy wh _) -> NodeLabel xy wh text
+
+resizeNode :: Node -> Size -> ModelAction ()
+resizeNode (Node (n, _)) wh =
+    modifyGraph $ modifyNodeLabel n $
+        \(_, NodeLabel xy _ text) -> NodeLabel xy wh text
 
 deleteNode :: Node -> ModelAction ()
 deleteNode n = do

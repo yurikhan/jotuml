@@ -13,7 +13,7 @@ import Data.VectorSpace
 import Debug.Trace
 import GHC.Exts
 import Graphics.Rendering.Cairo
-import Graphics.UI.Gtk hiding (Menu, Point)
+import Graphics.UI.Gtk hiding (Menu, Point, Size)
 import qualified Graphics.UI.Gtk as Gtk
 import Graphics.UI.Gtk.Builder
 import Graphics.UI.Gtk.Windows.MessageDialog
@@ -37,6 +37,7 @@ data View = View {
     nodePopupMenu :: Gtk.Menu,
     edgePopupMenu :: Gtk.Menu,
     layout :: Gtk.Layout,
+    textview :: Gtk.TextView,
     statusBar :: Gtk.Statusbar,
     layoutButtonPressHandler :: IORef (Click
                                        -> MouseButton
@@ -47,7 +48,8 @@ data View = View {
     layoutMotionNotifyHandler :: IORef (Point -> ViewAction),
     layoutButtonReleaseHandler :: IORef (Point -> ModelAndViewUpdate (IO ())),
     context :: IORef Context,
-    elasticContext :: IORef (Maybe ElasticContext)
+    elasticContext :: IORef (Maybe ElasticContext),
+    editContext :: IORef (Maybe EditContext)
     }
 
 data Menu = Menu {
@@ -68,6 +70,8 @@ data Menu = Menu {
 data Context = NoContext
              | NodeContext Node
              | forall edge . EdgeElement edge => EdgeContext edge
+
+data EditContext = EditNode Node
 
 data ElasticContext = ElasticContext
                       Model -- temporary, not necessarily canonical form
@@ -271,8 +275,9 @@ releaseElasticPath xy' modelRef view = do
 
         release' :: Model -> ElasticElement -> HitTest -> ModelAndViewUpdate (IO ())
 
-        release' _ (ElasticPath dir bs _ (FromNode u)) (OnNode v') =
-            addEdge dir u v' bs <@> endDrag
+        release' _ (ElasticPath dir bs _ (FromNode u)) (OnNode v')
+            | u === v' && null bs = idModel <@> endDrag >&> editNode u
+            | otherwise = addEdge dir u v' bs <@> endDrag
 
         release' _ (ElasticPath _ bs _ (FromNode u)) (OnEdgeDiamond d) =
             addBranch d u (reverse bs) <@> endDrag
@@ -324,6 +329,30 @@ releaseElasticPath xy' modelRef view = do
         release' _ _ _ = idModel <@> endDrag
 
 
+editNode :: Node -> ViewAction
+editNode n model view = do
+    writeIORef' (editContext view) $ Just $ EditNode n
+    let editor = textview view
+        (x, y) = nodeXY model n
+        (w, h) = nodeSize model n
+        [ww, hh] = map ceiling [w, h]
+        [left, top] = map floor [x - w/2, y - h/2]
+    buffer <- textViewGetBuffer editor
+    textBufferSetText buffer $ nodeText model n
+    widgetSetSizeRequest editor ww hh
+    layoutMove (layout view) editor left top
+    widgetShow editor
+    widgetGrabFocus editor
+    writeIORef' (layoutButtonPressHandler view) pressedWhileEditing
+
+endEditing :: ViewAction
+endEditing model view = do
+    let editor = textview view
+    widgetHide editor
+    writeIORef' (layoutButtonPressHandler view) pressed
+    refreshView model view
+
+
 refreshView :: ViewAction
 refreshView _ v = do
     widgetQueueDraw $ layout v
@@ -356,6 +385,7 @@ createView = do
                 "help_about_item", "node_delete_item", "edge_delete_item"]
 
     layout <- builderGetObject builder castToLayout "layout"
+    textview <- builderGetObject builder castToTextView "textview"
 
     statusBar <- builderGetObject builder castToStatusbar "status_bar"
 
@@ -364,8 +394,8 @@ createView = do
     layoutButtonReleaseHandler <- newIORef $ const $ idModel <@> idView
 
     context <- newIORef NoContext
-
     elasticContext <- newIORef Nothing
+    editContext <- newIORef Nothing
 
     let view = View builder window
                (Menu fileNewItem fileOpenItem fileSaveItem
@@ -373,11 +403,11 @@ createView = do
                 editCutItem editCopyItem editPasteItem
                 editDeleteItem helpAboutItem
                 nodeDeleteItem edgeDeleteItem)
-               nodePopupMenu edgePopupMenu layout statusBar
+               nodePopupMenu edgePopupMenu layout textview statusBar
                layoutButtonPressHandler
                layoutMotionNotifyHandler
                layoutButtonReleaseHandler
-               context elasticContext
+               context elasticContext editContext
 
     return view
 
@@ -399,23 +429,31 @@ renderView drawWindow model view = renderWithDrawable drawWindow $ do
 elasticModel :: ElasticContext -> Model
 elasticModel (ElasticContext m _) = m
 
+renderText :: String -> IO (PangoLayout, Size)
+renderText text = do
+    context <- cairoCreateContext Nothing
+    font <- fontDescriptionFromString "Liberation Sans 10"
+    contextSetFontDescription context font
+    layout <- layoutText context text
+    (Rectangle inkx _ inkw _, Rectangle _ _ _ logh) <-
+        layoutGetPixelExtents layout
+    let width = fromIntegral $ abs inkx + inkw
+        height = fromIntegral logh
+    layoutContextChanged layout
+    return (layout, (width, height))
+
+measureText :: String -> IO Size
+measureText text = do
+    (_, (w, h)) <- renderText text
+    return (w + 6, h + 6)
+
 renderNode :: Model -> Node -> Render ()
 renderNode model' n = do
     let (x, y) = nodeXY model' n
         (w, h) = nodeSize model' n
         text = nodeText model' n
     renderClosed . snapToPixels $ nodeBoundary model' n
-    (width, height, layout) <- liftIO $ do
-        context <- cairoCreateContext Nothing
-        font <- fontDescriptionFromString "Liberation Sans 10"
-        contextSetFontDescription context font
-        layout <- layoutText context text
-        (Rectangle inkx _ inkw _, Rectangle _ _ _ logh) <-
-            layoutGetPixelExtents layout
-        let width = fromIntegral $ abs inkx + inkw
-            height = fromIntegral logh
-        layoutContextChanged layout
-        return (width, height, layout)
+    (layout, (width, height)) <- liftIO $ renderText text
     translate (x - width / 2) (y - height / 2)
     showLayout layout
     identityMatrix
@@ -437,7 +475,9 @@ renderBranch model' b = renderLineString . snapToPixels $ branchGeometry model' 
 
 renderElasticPath :: Model -> ElasticElement -> Render ()
 renderElasticPath m' (ElasticPath dir bs xy ctx) = case ctx of
-    FromNode n             -> arrow $   dir ^.^ snapToNode m'  n . (++ [xy]) $ bs
+    FromNode n
+        | null bs && hitTest m' xy == OnNode n -> return ()
+        | otherwise -> arrow $   dir ^.^ snapToNode m'  n . (++ [xy]) $ bs
     FromEdgeEnd fn _ _ _ _ -> arrow $   dir ^.^ snapToNode m' fn . (++ [xy]) $ bs
     FromBranchStart _ _ n -> line $ Reverse ^.^ snapToNode m'  n . (++ [xy]) $ bs
     FromEdgeBend    _ _ d -> line $ snapToDiamond m' d $ bs ++ [xy]
@@ -653,6 +693,14 @@ pressed SingleClick RightButton bt _ (OnBranchSegment b _) = \mref view -> do
     (idModel <@> popupEdgeMenu (branchDiamond m b) bt) mref view
 pressed _ _ _ _ _ = idModel <@> idView
 ignorePressed _ _ _ _ _ = idModel <@> idView
+pressedWhileEditing _ _ _ _ _ mref view = do
+    Just (EditNode n) <- readIORef $ editContext view
+    let editor = textview view
+    buffer <- textViewGetBuffer editor
+    text <- get buffer textBufferText
+    model <- readIORef mref
+    size <- measureText text
+    ((resize n size >> setText n text) <@> endEditing) mref view
 
 layoutMotionNotify :: ModelAndViewUpdate (EventM EMotion Bool)
 layoutMotionNotify m v = do
