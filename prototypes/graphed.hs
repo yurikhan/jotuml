@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeSynonymInstances,
              FlexibleInstances,
              ExistentialQuantification #-}
+import Control.Arrow ((***))
 import Control.Exception.Base
 import Control.Monad
 import qualified Control.Monad.State.Lazy as S
@@ -383,6 +384,7 @@ createView = do
 renderView :: DrawWindow -> ViewAction
 renderView drawWindow model view = renderWithDrawable drawWindow $ do
     setSourceRGB 0 0 0
+    setLineWidth 1
     ec <- liftIO $ readIORef (elasticContext view)
     let model' = maybe model elasticModel ec
     mapM_ (renderNode model') $ modelNodes model'
@@ -400,22 +402,38 @@ elasticModel (ElasticContext m _) = m
 renderNode :: Model -> Node -> Render ()
 renderNode model' n = do
     let (x, y) = nodeXY model' n
-    arc x y nodeRadius 0 $ 2*pi
-    stroke
+        (w, h) = nodeSize model' n
+        text = nodeText model' n
+    renderClosed . snapToPixels $ nodeBoundary model' n
+    (width, height, layout) <- liftIO $ do
+        context <- cairoCreateContext Nothing
+        font <- fontDescriptionFromString "Liberation Sans 10"
+        contextSetFontDescription context font
+        layout <- layoutText context text
+        (Rectangle inkx _ inkw _, Rectangle _ _ _ logh) <-
+            layoutGetPixelExtents layout
+        let width = fromIntegral $ abs inkx + inkw
+            height = fromIntegral logh
+        layoutContextChanged layout
+        return (width, height, layout)
+    translate (x - width / 2) (y - height / 2)
+    showLayout layout
+    identityMatrix
 
 renderEdge :: Model -> Edge -> Render ()
-renderEdge model' e = renderArrowLineString $ edgeGeometry model' e
+renderEdge model' e = renderArrowLineString . snapToPixels $ edgeGeometry model' e
 
 renderDiamond :: Model -> EdgeDiamond -> Render ()
 renderDiamond model' d =
     renderLineString
+    . snapToPixels
     $ moveGeometry (diamondXY model' d)
       [(nodeRadius, 0), (0, (-nodeRadius)),
        ((-nodeRadius), 0), (0, nodeRadius),
        (nodeRadius, 0)]
 
 renderBranch :: Model -> EdgeBranch -> Render ()
-renderBranch model' b = renderLineString $ branchGeometry model' b
+renderBranch model' b = renderLineString . snapToPixels $ branchGeometry model' b
 
 renderElasticPath :: Model -> ElasticElement -> Render ()
 renderElasticPath m' (ElasticPath dir bs xy ctx) = case ctx of
@@ -426,8 +444,21 @@ renderElasticPath m' (ElasticPath dir bs xy ctx) = case ctx of
     FromEdgeSegment _ _ d -> line $ snapToDiamond m' d $ bs ++ [xy]
     FromEdgeDiamond     d -> line $ snapToDiamond m' d $ bs ++ [xy]
     FromBranchEnd   d b n -> line $ snapToDiamond m' d $ bs ++ [xy]
-    where arrow = renderArrowLineString
-          line = renderLineString
+    where arrow = renderArrowLineString . snapToPixels
+          line = renderLineString . snapToPixels
+
+snapToPixels :: LineString -> LineString
+snapToPixels = map snapPoint
+    where snapPoint = snapCoord *** snapCoord
+          snapCoord = (+0.5) . fromIntegral . floor
+
+renderClosed :: LineString -> Render ()
+renderClosed [] = return ()
+renderClosed g@((x0,y0):xys) = do
+    moveTo x0 y0
+    mapM_ (uncurry lineTo) xys
+    closePath
+    stroke
 
 renderLineString :: LineString -> Render ()
 renderLineString [] = return ()
@@ -643,7 +674,7 @@ layoutButtonReleased m v = do
     return True
 
 addNewNode :: Point -> ModelAndViewUpdate (IO ())
-addNewNode xy = addNode xy <@> refreshView
+addNewNode xy = addNode xy (20, 20) "" <@> refreshView
                 >>> \mref view -> do
                     m <- readIORef mref
                     let OnNode n = hitTest m xy

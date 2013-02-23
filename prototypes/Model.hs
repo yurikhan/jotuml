@@ -8,7 +8,8 @@ module Model
         modelEdgeDiamonds, modelEdgeBranches,
         Element, ElementLabel (..), elementId,
         PointElement (..), LinearElement (..), EdgeElement (..),
-        Node (), nodeXY, snapToNode, nodeEnds, nodeEdges,
+        Node (), nodeXY, nodeSize, nodeText,
+        nodeBoundary, snapToNode, nodeEnds, nodeEdges,
         nodeDiamonds, nodeBranches, nodeRadius,
         Edge (), edgeBends, edgeGeometry, edgeEnds, edgeNodes,
         EdgeDiamond (), diamondXY, snapToDiamond, diamondBranches, diamondNodes,
@@ -75,6 +76,7 @@ Forward ^$^ g = g
 Reverse ^$^ g = reverse g
 
 type Point = (Double, Double)
+type Size = (Double, Double)
 type Segment = (Point, Point)
 type LineString = [Point]
 
@@ -172,12 +174,12 @@ empty = Model G.empty
 
 star :: Model
 star = S.execState (addEdges =<< addNodes) empty
-    where points :: [Point]
-          points = [(x, y) | i <- [0..4] :: [G.Node],
+    where points :: [(Point, Size, String)]
+          points = [((x, y), (20, 20), show i) | i <- [0..4] :: [G.Node],
                     let x = 300 + 200 * sin (2*pi/5 * fromIntegral i)
                         y = 225 - 200 * cos (2*pi/5 * fromIntegral i)]
           addNodes :: ModelAction [Node]
-          addNodes = mapM addNode points
+          addNodes = mapM (\(xy, wh, name) -> addNode xy wh name) points
           addEdges :: [Node] -> ModelAction [(Edge, [EdgeEnd])]
           addEdges ns = S.zipWithM addEdge' ns (drop 2 $ cycle ns)
           addEdge' :: Node -> Node -> ModelAction (Edge, [EdgeEnd])
@@ -186,7 +188,7 @@ star = S.execState (addEdges =<< addNodes) empty
 
 type Graph = G.Gr ElementLabel ()
 
-data ElementLabel = NodeLabel Point -- center of circle
+data ElementLabel = NodeLabel Point Size String -- center of rectangle, text
                   | EdgeLabel LineString -- bends from Forward to Reverse end
                   | EdgeDiamondLabel Point -- center of diamond
                   | EdgeEndLabel Direction
@@ -247,7 +249,7 @@ instance EdgeElement EdgeDiamond where delete = deleteEdgeDiamond
 (===) = (==) `on` elementId
 
 isNode :: Element -> Bool
-isNode (_, NodeLabel _) = True
+isNode (_, NodeLabel _ _ _) = True
 isNode _ = False
 
 isEdge :: Element -> Bool
@@ -290,11 +292,25 @@ modelEdgeBranches = map EdgeBranch . filter isEdgeBranch . modelElements
 
 
 nodeXY :: Model -> Node -> Point
-nodeXY _ (Node (_, NodeLabel xy)) = xy
+nodeXY _ (Node (_, NodeLabel xy _ _)) = xy
+
+nodeSize :: Model -> Node -> Size
+nodeSize _ (Node (_, NodeLabel _ wh _)) = wh
+
+nodeText :: Model -> Node -> String
+nodeText _ (Node (_, NodeLabel _ _ s)) = s
+
+nodeBoundary :: Model -> Node -> LineString
+nodeBoundary _ (Node (_, NodeLabel (x, y) (w, h) _)) =
+    [(x - w/2, y - w/2),
+     (x - w/2, y + w/2),
+     (x + w/2, y + w/2),
+     (x + w/2, y - w/2),
+     (x - w/2, y - w/2)]
 
 snapToNode :: Model -> Node -> LineString -> LineString
-snapToNode m (Node (_, NodeLabel xy)) geom@(xy':_) =
-    V.lerp xy xy' (nodeRadius / distance xy xy') : geom
+snapToNode m n geom@(xy':_) =
+    projection xy' (nodeBoundary m n) : geom
 
 nodeEnds :: Model -> Node -> [EdgeEnd]
 nodeEnds m = map EdgeEnd . filter isEdgeEnd . elementNeighbors m
@@ -449,9 +465,10 @@ data HitTest = OnNode          Node
              | Nowhere
              deriving (Show)
 
-distanceTo :: Model -> Point -> HitTest -> (Int, Double)
+distanceTo :: Model -> Point -> HitTest -> (Int, Maybe Double)
 distanceTo m xy ht = case ht of
-    OnNode n            -> 0 ^+ nodeXY m n
+    OnNode n            | within xy (nodeXY m n) (nodeSize m n) -> (0, Just 0)
+                        | otherwise -> (0, Nothing)
     OnEdgeDiamond d     -> 0 ^+ diamondXY m d
     OnEdgeEnd e         -> 1 ^+ endXY m e
     OnBranchStart b     -> 1 ^+ branchStartXY m b
@@ -460,14 +477,18 @@ distanceTo m xy ht = case ht of
     OnBranchBend b i    -> 2 ^+ branchBends m b !! (i-1)
     OnEdgeSegment e i   -> 3 ^+ segments (edgeGeometry m e) !! i
     OnBranchSegment b i -> 3 ^+ segments (branchGeometry m b) !! i
-    Nowhere             -> 9 ^+ xy
-    where rank ^+ geom = (rank, distance xy geom)
+    Nowhere             -> (9, Just 0)
+    where rank ^+ geom
+              | distance xy geom < nodeRadius = (rank, Just $ distance xy geom)
+              | otherwise = (rank, Nothing)
           infix 0 ^+
+          within (x', y') (x, y) (w, h) = abs (x' - x) < w / 2
+                                          && abs (y' - y) < h / 2
 
 hitTest :: Model -> Point -> HitTest
 hitTest m xy = fst
                . L.minimumBy (comparing snd)
-               . filter ((< 10) . snd . snd)
+               . filter (Mb.isJust . snd . snd)
                . map (id &&& distanceTo m xy)
                $ possibilities
     where possibilities =
@@ -505,18 +526,18 @@ modifyGraph = S.modify . liftModel
     where liftModel f (Model g) = Model $ f g
 
 
-addNode :: Point -> ModelAction Node
-addNode xy = do
+addNode :: Point -> Size -> String -> ModelAction Node
+addNode xy wh name = do
     [n] <- G.newNodes 1 <$> getGraph
-    let ne = (n, NodeLabel xy)
+    let ne = (n, NodeLabel xy wh name)
     modifyGraph $ G.insNode ne
     return $ Node ne
 
 -- Move NODE to POINT. Also move its self-edges (if any).
 moveNode :: Node -> Point -> ModelAction ()
-moveNode n@(Node (_, NodeLabel xy)) xy' =
+moveNode n@(Node (_, NodeLabel xy wh name)) xy' =
     S.modify $ mapElements fNode idE fEdge idE idE
-    where fNode (n', _) | n === n' = Just $ NodeLabel xy'
+    where fNode (n', _) | n === n' = Just $ NodeLabel xy' wh name
                         | otherwise = Nothing
           fEdge (Edge (_, EdgeLabel bends), [(_, n'), (_, n'')])
               | n === n' && n === n'' = Just . EdgeLabel $ moveGeometry dxy bends
@@ -561,7 +582,7 @@ normalizeDiamond dd@(EdgeDiamond (d, EdgeDiamondLabel xy)) = do
 
 addEdge :: Direction -> Node -> Node -> LineString -> ModelAction (Edge, [EdgeEnd])
 addEdge Reverse v u bends = addEdge Forward u v (reverse bends)
-addEdge Forward (Node (u, NodeLabel uxy)) (Node (v, NodeLabel vxy)) bends = do
+addEdge Forward (Node (u, _)) (Node (v, _)) bends = do
     [e, ue, ve] <- G.newNodes 3 <$> getGraph
     let ee = (e, EdgeLabel bends)
         uee = (ue, EdgeEndLabel Forward)
