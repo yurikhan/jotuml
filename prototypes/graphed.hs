@@ -511,7 +511,7 @@ renderArrowLineString :: LineString -> Render ()
 renderArrowLineString [] = return ()
 renderArrowLineString g@((x0,y0):xys) = do
     renderLineString g
-    renderArrowhead 10 (pi/6) xyN1 xyN
+    renderArrowhead 10 (pi/12) xyN1 xyN
     stroke
     where xyN : xyN1 : _ = reverse g
 
